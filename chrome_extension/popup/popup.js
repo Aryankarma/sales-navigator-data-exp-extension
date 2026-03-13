@@ -1,17 +1,16 @@
-$(document).on('click', '#save_api_key', function(event) {
-    var api_key = $('#api_key').val()
-    chrome.storage.sync.set({api_key: api_key});
-    
-    $('#save_api_key').text('Saved !');
-    
-    setTimeout(function() {
-        $('#save_api_key').text('Save');
-      }, 2000)
-})
+function updateCount() {
+  chrome.storage.local.get('users', (res) => {
+    const count = res.users ? Object.keys(res.users).length : 0;
+    document.getElementById('user_count').textContent = count;
+  });
+}
 
-chrome.tabs.query({active: true, currentWindow: true}, ([tab]) => {
-    chrome.storage.sync.get('api_key', function (res) {
-        console.log('api_key =', res.api_key)
-        $('#api_key').val(res.api_key);
+document.addEventListener('DOMContentLoaded', () => {
+  updateCount();
+
+  document.getElementById('clear_data').addEventListener('click', () => {
+    chrome.storage.local.clear(() => {
+      updateCount();
     });
+  });
 });

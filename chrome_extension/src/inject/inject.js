@@ -1,6 +1,6 @@
 // Add monkey patch to catch requests
 var s = document.createElement('script');
-s.src = chrome.extension.getURL("src/inject/interceptRequest.js");
+s.src = chrome.runtime.getURL("src/inject/interceptRequest.js");
 s.onload = function() {
     this.remove();
 };

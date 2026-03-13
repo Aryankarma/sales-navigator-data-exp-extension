@@ -6,14 +6,12 @@
         <script src="popup.js"></script>
     </head>
     <body>
-        <div class='header'>
-            Export to Hubspot
-        </div>
+        <div class='header'>Export Sales Navigator data</div>
         <div class='content'>
-            <div class="description">Enter the API Key that will be used to send data to</div>
-            <input placeholder="API Key" id="api_key" type="text">
+            <div class="description">Click the export button on a LinkedIn Sales Navigator search to download a CSV.</div>
+            <div class="status">Saved profiles: <span id="user_count">0</span></div>
             <div>
-                <button id='save_api_key'>Save</button>    
+                <button id="clear_data">Clear saved profiles</button>
             </div>
         </div>
     </body>
