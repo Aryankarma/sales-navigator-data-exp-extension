@@ -15,9 +15,6 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
   return true;
 });
 
-var COMPANIES_KEY = 'companies';
-var USERS_KEY = 'users';
-
 // Create observer object used to check company is fetched
 var observer = new MutationObserver(function(mutations) {
   mutations.forEach(function(mutation) {
@@ -35,31 +32,21 @@ var all_users = [];
 // Company search helpers — scrape data directly from the DOM
 // ---------------------------------------------------------------------------
 function scrape_company_from_row($item) {
-  // Company name
   var name = $item.find('a[data-control-name="view_company_via_result_name"]').text().trim();
 
-  // Company ID from the href  e.g. /sales/company/13480?...
   var href = $item.find('a[data-control-name="view_company_via_result_name"]').attr('href') || '';
   var company_id = href.split('?')[0].split('/').slice(-1)[0];
 
-  // Industry
   var industry = $item.find('[data-anonymize="industry"]').text().trim();
-
-  // Revenue
   var revenue = $item.find('[data-anonymize="revenue"]').text().trim();
 
-  // Employee count — the aria-label on the employees link is most reliable
   var employees_label = $item.find('[data-anonymize="company-size"]').attr('aria-label') || '';
   var employees = $item.find('[data-anonymize="company-size"]').text().trim() || employees_label;
 
-  // About / description  — pull from the full `title` attribute of the clamped div
   var description = $item.find('[data-anonymize="person-blurb"]').attr('title') || 
                     $item.find('[data-anonymize="person-blurb"]').text().trim();
 
-  // Location
   var location = $item.find('[data-anonymize="location"]').text().trim();
-
-  // Website — not present in the search list DOM, leave blank
   var website = '';
 
   console.log('[Extension] Scraped company:', { name, company_id, industry, revenue, employees, location });
@@ -71,30 +58,23 @@ function scrape_company_from_row($item) {
 // Scrape a single lead row from the people search DOM
 // ---------------------------------------------------------------------------
 function scrape_lead_from_row($item) {
-  // Full name
   var name = $item.find('a[data-control-name="view_lead_panel_via_search_lead_name"] span[data-anonymize="person-name"]').text().trim();
 
-  // Profile ID from the lead href  e.g. /sales/lead/ACwAADeCQ7s...,NAME_SEARCH,...
   var profileHref = $item.find('a[data-control-name="view_lead_panel_via_search_lead_name"]').attr('href') || '';
   var profile_id = profileHref.split('?')[0].split('/sales/lead/').slice(-1)[0].split(',')[0];
 
-  // Current title / position
   var title = $item.find('span[data-anonymize="title"]').first().text().trim();
 
-  // Current company name + ID
   var $companyLink = $item.find('a[data-control-name="view_company_via_profile_lockup"]').first();
   var company = $companyLink.text().trim();
   var companyHref = $companyLink.attr('href') || '';
   var company_id = companyHref.split('?')[0].split('/').slice(-1)[0];
 
-  // Location
   var location = $item.find('span[data-anonymize="location"]').first().text().trim();
 
-  // About / blurb — full text lives in the title attribute of the clamped container
   var about = $item.find('[data-anonymize="person-blurb"]').attr('title') ||
               $item.find('[data-anonymize="person-blurb"]').text().trim();
 
-  // Time in role / company
   var tenure = $item.find('[data-anonymize="job-title"]').text().replace(/\s+/g, ' ').trim();
 
   console.log('[Extension] Scraped lead:', { name, profile_id, title, company, location });
@@ -191,14 +171,20 @@ function reset_user() {
 }
 
 // ---------------------------------------------------------------------------
-// Update the floating button count
+// Update the floating button count — asks the background script (no storage)
 // ---------------------------------------------------------------------------
 function refresh_count() {
-  var key = window.location.href.includes('/search/company') ? COMPANIES_KEY : USERS_KEY;
-  chrome.storage.local.get(key).then(function(data) {
-    var count = Object.keys(data[key] || {}).length;
-    console.log('[Extension] refresh_count key=' + key + ' count=' + count);
+  var isCompany = window.location.href.includes('/search/company');
+  var cb = (new Date()).getTime();
+  callbacks[cb] = function(rsp) {
+    var count = rsp.response.value;
+    console.log('[Extension] refresh_count count=' + count);
     $('.extension-button').html('<b>Export ' + count + ' items</b>');
+  };
+  chrome.runtime.sendMessage({
+    type: 'extension:get_count',
+    data: { type: isCompany ? 'companies' : 'users' },
+    callback_id: cb
   });
 }
 
@@ -224,11 +210,14 @@ async function start_check() {
       '<div class="extension-button"><b>Export 0 items</b></div><div class="extension-button-delete">x</div>'
     );
 
-    // Clear button
-    $($button.find('.extension-button-delete')[0]).on('click', async function() {
-      chrome.storage.local.clear();
-      reset_user();
-      $('.extension-button').html('<b>Export 0 items</b>');
+    // Clear button — tells background to wipe in-memory stores
+    $($button.find('.extension-button-delete')[0]).on('click', function() {
+      var cb = (new Date()).getTime();
+      callbacks[cb] = function() {
+        reset_user();
+        $('.extension-button').html('<b>Export 0 items</b>');
+      };
+      chrome.runtime.sendMessage({ type: 'extension:clear_all', callback_id: cb });
     });
 
     // Export / download button
@@ -243,7 +232,9 @@ async function start_check() {
           if (r.status.code == 200) {
             $button_elem.addClass('valid').text('Exported!');
             reset_user();
-            chrome.storage.local.clear();
+            var clearCb = (new Date()).getTime();
+            callbacks[clearCb] = function() {};
+            chrome.runtime.sendMessage({ type: 'extension:clear_all', callback_id: clearCb });
             setTimeout(function() {
               $button_elem.removeClass('valid');
               $button_elem.html('<b>Export 0 items</b>');
@@ -291,7 +282,6 @@ function individual_finder_tick() {
     $('.artdeco-list__item').each(function() {
       if ($(this).hasClass('extension-init')) return;
 
-      // Skip skeleton/loading rows — only process fully loaded ACCOUNT rows
       if ($(this).find('[data-x-search-result="ACCOUNT"]').length === 0) return;
 
       var $item = $(this);
@@ -308,24 +298,14 @@ function individual_finder_tick() {
         return;
       }
 
-      // Mark as init AFTER we confirmed we have valid data
       $item.addClass('extension-init');
 
       var $btn = $('<div/>').addClass('extension-individual-button available').html('Export');
-
-      // Check if already saved (Promise API for MV3)
-      chrome.storage.local.get(COMPANIES_KEY).then(function(data) {
-        var companies = data[COMPANIES_KEY] || {};
-        if (companies[company_data.company_id]) {
-          $btn.removeClass('available').addClass('added').html('Added');
-        }
-      });
 
       $btn.on('click', function(e) {
         var $b = $(e.currentTarget);
 
         if ($b.hasClass('added')) {
-          // Remove
           $b.removeClass('added').addClass('available').html('Export');
           console.log('[Extension] Removing company', company_data.company_id);
           var cb = (new Date()).getTime();
@@ -336,7 +316,6 @@ function individual_finder_tick() {
           });
           callbacks[cb] = function() { refresh_count(); };
         } else {
-          // Add — re-scrape fresh data at click time
           var fresh = scrape_company_from_row($item);
           console.log('[Extension] Adding company:', fresh);
           $b.removeClass('available').addClass('added').html('Added');
@@ -360,11 +339,10 @@ function individual_finder_tick() {
     $('.artdeco-list__item').each(function() {
       if ($(this).hasClass('extension-init')) return;
 
-      // Only process fully loaded LEAD rows
       if ($(this).find('[data-x-search-result="LEAD"]').length === 0) return;
 
       var $item = $(this);
-      var actions = $item.find('.ml8').last().find('ul').first();
+      var actions = $item.find('[data-x-search-result="LEAD"]').find('.mt2.mr5').children('ul').first();
       if (!actions.length) return;
 
       var lead_data = scrape_lead_from_row($item);
@@ -376,14 +354,6 @@ function individual_finder_tick() {
       $item.addClass('extension-init');
 
       var $btn = $('<div/>').addClass('extension-individual-button available').html('Export');
-
-      // Check if already saved
-      chrome.storage.local.get(USERS_KEY).then(function(data) {
-        var users = data[USERS_KEY] || {};
-        if (users[lead_data.profile_id]) {
-          $btn.removeClass('available').addClass('added').html('Added');
-        }
-      });
 
       $btn.on('click', function(e) {
         var $b = $(e.currentTarget);

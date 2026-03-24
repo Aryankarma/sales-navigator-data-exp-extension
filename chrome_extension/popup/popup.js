@@ -1,12 +1,9 @@
 function updateCount() {
-  chrome.storage.local.get('users', (res) => {
-    const count = res.users ? Object.keys(res.users).length : 0;
-    document.getElementById('user_count').textContent = count;
-  });
-
-  chrome.storage.local.get('companies', (res) => {
-    const count = res.companies ? Object.keys(res.companies).length : 0;
-    document.getElementById('company_count').textContent = count;
+  chrome.runtime.sendMessage({ type: 'popup:get_counts' }, function(response) {
+    if (response) {
+      document.getElementById('user_count').textContent = response.users || 0;
+      document.getElementById('company_count').textContent = response.companies || 0;
+    }
   });
 }
 
@@ -31,7 +28,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   document.getElementById('clear_data').addEventListener('click', () => {
-    chrome.storage.local.clear(() => {
+    chrome.runtime.sendMessage({ type: 'popup:clear_all' }, function() {
       updateCount();
     });
   });
