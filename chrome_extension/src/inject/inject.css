@@ -112,11 +112,28 @@
   cursor: pointer;
 
   font-size: 13px;
-  padding: 2px 15px 3px;
-  margin: 11px 0 0 0;
+  padding: 7px 20px;
+  margin: 0;
   animation: fadeIn 0.4s ease-out 0s forwards;
   opacity: 0;
   text-align: center;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+}
+
+.extension-export-li {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  padding-left: 8px;
+}
+
+.extension-export-wrap {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  padding-left: 8px;
 }
 
 .extension-individual-button.added {

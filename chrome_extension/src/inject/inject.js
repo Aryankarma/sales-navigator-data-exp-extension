@@ -350,7 +350,8 @@ function individual_finder_tick() {
         }
       });
 
-      actions.append($btn);
+      var $wrap = $('<span/>').addClass('extension-export-wrap').append($btn);
+      actions.append($wrap);
       console.log('[Extension] Export button added for:', company_data.name, '| ID:', company_data.company_id);
     });
 
@@ -411,7 +412,8 @@ function individual_finder_tick() {
         }
       });
 
-      actions.append($btn);
+      var $li = $('<li/>').addClass('extension-export-li').append($btn);
+      actions.append($li);
       console.log('[Extension] Export button added for lead:', lead_data.name, '| ID:', lead_data.profile_id);
     });
   }
