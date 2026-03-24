@@ -1,9 +1,10 @@
 
 body {
-    /*width: 275px;*/
-    /*height: 200px;*/
+    width: 300px;
+    min-height: 200px;
     margin: 0px;
     background: #F8F9FB;
+    font-family: Arial, sans-serif;
 }
 
 .header {
@@ -27,8 +28,17 @@ body {
 }
 
 .description {
-    margin-top: 10px;
-    margin-bottom: 10px;
+    margin: 15px 10px;
+    text-align: center;
+    font-size: 14px;
+    color: #555;
+}
+
+.status {
+    margin: 10px 0;
+    font-size: 16px;
+    font-weight: bold;
+    color: #333;
 }
 
 input {
@@ -65,16 +75,18 @@ button {
     background: #1abc9c;
     cursor: pointer;
     border-radius: 3px;
-    padding: 6px;
-    width: 200px;
+    padding: 10px;
+    width: 250px;
     color: white;
-    /*margin-left: 25px;*/
+    margin: 5px 0;
     box-shadow: 0 3px 6px 0 rgba(0, 0, 0, 0.2);
+    transition: all 0.3s;
 }
 
 button:hover {
-    transform: translateY(-3px);
+    transform: translateY(-2px);
     box-shadow: 0 6px 6px 0 rgba(0, 0, 0, 0.2);
+    background: #16a085;
 }
 
 button:focus {outline:0;}

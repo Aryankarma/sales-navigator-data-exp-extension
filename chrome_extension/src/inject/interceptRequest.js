@@ -109,25 +109,53 @@
                         document.body.insertBefore(elem, document.getElementsByTagName('code')[0]);
                     })
                 } else if (myUrl.includes('/sales-api/salesapicompanies')) {
-                    var arr = JSON.parse(this.responseText);
-                    var name = arr.name;
-                    var description = arr.description;
-                    var industry = arr.industry;
-                    var website = arr.website;
-                    var company_id = arr.entityUrn.split(":").slice(-1)[0];
-                    
-                    document.dispatchEvent(new CustomEvent("extension:company:add", {
-                        "detail": {
-                            type: "extension:company:add",
-                            company: {
-                                name,
-                                description,
-                                industry,
-                                website,
-                                company_id
+                    if (this.responseType == 'blob') {
+                        this.response.text().then( (data) => {
+                            var arr = JSON.parse(data);
+                            var name = arr.name;
+                            var description = arr.description;
+                            var industry = arr.industry;
+                            var website = arr.website;
+                            var company_id = (arr.entityUrn && typeof arr.entityUrn === 'string') ? arr.entityUrn.split(":").slice(-1)[0] : null;
+                            
+                            if (company_id) {
+                                document.dispatchEvent(new CustomEvent("extension:company:add", {
+                                    "detail": {
+                                        type: "extension:company:add",
+                                        company: {
+                                            name,
+                                            description,
+                                            industry,
+                                            website,
+                                            company_id
+                                        }
+                                    }
+                                }))
                             }
+                        })
+                    } else {
+                        var arr = JSON.parse(this.responseText);
+                        var name = arr.name;
+                        var description = arr.description;
+                        var industry = arr.industry;
+                        var website = arr.website;
+                        var company_id = (arr.entityUrn && typeof arr.entityUrn === 'string') ? arr.entityUrn.split(":").slice(-1)[0] : null;
+                        
+                        if (company_id) {
+                            document.dispatchEvent(new CustomEvent("extension:company:add", {
+                                "detail": {
+                                    type: "extension:company:add",
+                                    company: {
+                                        name,
+                                        description,
+                                        industry,
+                                        website,
+                                        company_id
+                                    }
+                                }
+                            }))
                         }
-                    }))
+                    }
                 }
             }
         });
