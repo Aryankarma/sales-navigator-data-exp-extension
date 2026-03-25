@@ -27,23 +27,41 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
   return true;
 });
 
+function get_jobs_container() {
+  let container = $('[componentkey="SearchResultsMainContent"]');
+  if (container.length === 0) container = $('[data-testid="lazy-column"]');
+  if (container.length === 0) container = $('.scaffold-layout__list');
+  if (container.length === 0) container = $('body'); // robust fallback
+  return container;
+}
+
+function get_job_items(container) {
+  var items = container.find('div[role="button"][componentkey]');
+  if (items.length === 0) {
+    items = container.find('.f55dc56d').closest('div._4ac719f8.d578948b');
+  }
+  if (items.length === 0) {
+    items = container.find('div[data-view-name="job-card"]');
+  }
+  return items;
+}
+
 // Scraper for Job Search results
 function scrape_all_jobs() {
   const jobs = [];
-  // Use the container provided in the snippet
-  let container = $('[componentkey="SearchResultsMainContent"]');
-  if (container.length === 0) {
-    container = $('[data-testid="lazy-column"]');
-  }
+  let container = get_jobs_container();
   
   if (container.length === 0) {
     console.warn('[Extension] Jobs container not found');
     return jobs;
   }
 
-  container.find('div[role="button"][componentkey]').each(function() {
+  get_job_items(container).each(function() {
     const $item = $(this);
     
+    // Only scrape if the button is in 'added' selected state
+    if ($item.find('.jobs-extract-btn.added').length === 0) return;
+
     // Title: usually in a p with class f55dc56d
     const title = $item.find('.f55dc56d').find('span._4c50b7df').first().text().trim() || 
                   $item.find('.f55dc56d').text().trim();
@@ -478,8 +496,45 @@ function individual_finder_tick() {
       console.log('[Extension] Export button added for:', company_data.name, '| ID:', company_data.company_id);
     });
 
+  } else if (window.location.href.includes('/jobs/')) {
+    // Jobs page
+    let container = get_jobs_container();
+    if (container.length === 0) return;
+
+    get_job_items(container).each(function() {
+      if ($(this).hasClass('extension-init')) return;
+      $(this).addClass('extension-init');
+
+      var $item = $(this);
+      
+      var $btn = $('<div/>').addClass('extension-individual-button available jobs-extract-btn').html('Extract');
+      $btn.css({'margin': '8px', 'font-size': '12px', 'padding': '4px 8px', 'border-radius': '4px', 'background': '#fff', 'border': '1px solid #0073b1', 'color': '#0073b1', 'cursor': 'pointer', 'display': 'inline-block', 'font-weight': '600', 'z-index': '9999', 'position': 'relative'});
+      
+      $btn.on('click', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        var $b = $(e.currentTarget);
+        if ($b.hasClass('added')) {
+          $b.removeClass('added').addClass('available').html('Extract').css({'background': '#fff', 'color': '#0073b1'});
+        } else {
+          $b.removeClass('available').addClass('added').html('Selected').css({'background': '#0073b1', 'color': '#fff'});
+        }
+      });
+      
+      var footer = $item.find('._030d77d9').last();
+      if (footer.length === 0) {
+        footer = $item.find('.job-card-container__metadata-wrapper, .job-card-container__footer-item').last();
+      }
+      
+      if (footer.length > 0) {
+        footer.append($btn);
+      } else {
+        $item.append($btn);
+      }
+    });
+
   } else {
-    // People / leads search page — scrape directly from DOM
+    // People / leads search page - scrape directly from DOM
     $('.artdeco-list__item').each(function() {
       if ($(this).hasClass('extension-init')) return;
 
