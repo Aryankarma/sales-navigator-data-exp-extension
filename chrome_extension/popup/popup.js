@@ -20,11 +20,15 @@ document.addEventListener('DOMContentLoaded', () => {
   updateCount();
 
   document.getElementById('download_csv').addEventListener('click', () => {
-    chrome.runtime.sendMessage({ type: 'popup:download_csv' });
+    chrome.runtime.sendMessage({ type: 'popup:download_csv' }, () => {
+      updateCount();
+    });
   });
 
   document.getElementById('download_companies_csv').addEventListener('click', () => {
-    chrome.runtime.sendMessage({ type: 'popup:download_companies_csv' });
+    chrome.runtime.sendMessage({ type: 'popup:download_companies_csv' }, () => {
+      updateCount();
+    });
   });
 
   document.getElementById('clear_data').addEventListener('click', () => {

@@ -129,11 +129,15 @@ async function add_user(person) {
   if (checked && name !== "") {
     var user_data = { name, firstName, lastName, company, company_id, title };
     
-    chrome.runtime.sendMessage({
-      type: "extension:users:add",
-      data: user_data,
-      callback_id: callback_id
-    });
+    try {
+      if (chrome.runtime && chrome.runtime.id) {
+        chrome.runtime.sendMessage({
+          type: "extension:users:add",
+          data: user_data,
+          callback_id: callback_id
+        });
+      }
+    } catch (e) { console.info('[Extension] Context invalidated, refresh required.'); }
     
     callbacks[callback_id] = function(rsp) {
       if (rsp.type == 'users:number') {
@@ -146,11 +150,15 @@ async function add_user(person) {
 async function remove_user(person) {
   var {name, company} = get_user_info(person);
   var callback_id = (new Date()).getTime();
-  chrome.runtime.sendMessage({
-    type: "extension:users:remove",
-    data: {name, company},
-    callback_id: callback_id
-  });
+  try {
+    if (chrome.runtime && chrome.runtime.id) {
+      chrome.runtime.sendMessage({
+        type: "extension:users:remove",
+        data: {name, company},
+        callback_id: callback_id
+      });
+    }
+  } catch (e) { console.info('[Extension] Context invalidated, refresh required.'); }
   
   callbacks[callback_id] = function(rsp) {
     if (rsp.type == 'users:number') {
@@ -181,11 +189,15 @@ function refresh_count() {
     console.log('[Extension] refresh_count count=' + count);
     $('.extension-button').html('<b>Export ' + count + ' items</b>');
   };
-  chrome.runtime.sendMessage({
-    type: 'extension:get_count',
-    data: { type: isCompany ? 'companies' : 'users' },
-    callback_id: cb
-  });
+  try {
+    if (chrome.runtime && chrome.runtime.id) {
+      chrome.runtime.sendMessage({
+        type: 'extension:get_count',
+        data: { type: isCompany ? 'companies' : 'users' },
+        callback_id: cb
+      });
+    }
+  } catch (e) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -217,13 +229,30 @@ async function start_check() {
         reset_user();
         $('.extension-button').html('<b>Export 0 items</b>');
       };
-      chrome.runtime.sendMessage({ type: 'extension:clear_all', callback_id: cb });
+      try {
+        if (chrome.runtime && chrome.runtime.id) {
+          chrome.runtime.sendMessage({ type: 'extension:clear_all', callback_id: cb });
+        }
+      } catch (e) {}
     });
 
     // Export / download button
     var $button_elem = $($button.find('.extension-button')[0]);
     $button_elem.on('click', async function() {
       var callback_id = (new Date()).getTime();
+
+      // Check count first — don't export if zero
+      var countText = $button_elem.text();
+      var countMatch = countText.match(/\d+/);
+      var currentCount = countMatch ? parseInt(countMatch[0]) : 0;
+      
+      if (currentCount === 0) {
+        $button_elem.addClass('error').text('No leads to export');
+        setTimeout(() => refresh_count(), 2000);
+        return;
+      }
+
+      $button_elem.addClass('loading').text('Exporting...');
 
       callbacks[callback_id] = function(rsp) {
         $button_elem.removeClass('loading');
@@ -232,15 +261,13 @@ async function start_check() {
           if (r.status.code == 200) {
             $button_elem.addClass('valid').text('Exported!');
             reset_user();
-            var clearCb = (new Date()).getTime();
-            callbacks[clearCb] = function() {};
-            chrome.runtime.sendMessage({ type: 'extension:clear_all', callback_id: clearCb });
             setTimeout(function() {
               $button_elem.removeClass('valid');
-              $button_elem.html('<b>Export 0 items</b>');
+              refresh_count(); // Background already cleared the store
             }, 3000);
           } else {
-            $button_elem.addClass('error').text('Error: ' + r.status.message);
+            $button_elem.addClass('error').text('Error: ' + (r.status.message || r.status.code));
+            setTimeout(() => refresh_count(), 3000);
           }
         }
       };
@@ -249,7 +276,8 @@ async function start_check() {
         console.log('[Extension] Sending extension:companies:send');
         chrome.runtime.sendMessage({ type: "extension:companies:send", callback_id: callback_id });
       } else {
-        chrome.runtime.sendMessage({ type: "extension:users:send", all_users, callback_id: callback_id });
+        console.log('[Extension] Sending extension:users:send');
+        chrome.runtime.sendMessage({ type: "extension:users:send", callback_id: callback_id });
       }
     });
 
