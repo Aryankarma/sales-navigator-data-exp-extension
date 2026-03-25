@@ -90,3 +90,9 @@ button:hover {
 }
 
 button:focus {outline:0;}
+#export_all_jobs {
+    background: #3498db;
+}
+#export_all_jobs:hover {
+    background: #2980b9;
+}

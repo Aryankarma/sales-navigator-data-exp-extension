@@ -12,8 +12,124 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
   if (callbacks[request.callback_id]) {
     callbacks[request.callback_id](request);
   }
+
+  if (request.type === 'popup:export_jobs') {
+    const jobs = scrape_all_jobs();
+    console.log('[Extension] Scraped jobs:', jobs.length);
+    chrome.runtime.sendMessage({
+      type: 'extension:jobs:send',
+      data: jobs,
+      callback_id: (new Date()).getTime()
+    });
+    sendResponse({ ok: true, count: jobs.length });
+  }
+
   return true;
 });
+
+// Scraper for Job Search results
+function scrape_all_jobs() {
+  const jobs = [];
+  // Use the container provided in the snippet
+  let container = $('[componentkey="SearchResultsMainContent"]');
+  if (container.length === 0) {
+    container = $('[data-testid="lazy-column"]');
+  }
+  
+  if (container.length === 0) {
+    console.warn('[Extension] Jobs container not found');
+    return jobs;
+  }
+
+  container.find('div[role="button"][componentkey]').each(function() {
+    const $item = $(this);
+    
+    // Title: usually in a p with class f55dc56d
+    const title = $item.find('.f55dc56d').find('span._4c50b7df').first().text().trim() || 
+                  $item.find('.f55dc56d').text().trim();
+    
+    // Company: resides in class _41247193
+    const company = $item.find('._41247193').first().text().trim();
+    
+    // Location and Posted often share classes like ad75f074
+    let location = '';
+    let posted = '';
+    
+    $item.find('.ad75f074').each(function() {
+      const text = $(this).text().trim();
+      if (text.toLowerCase().includes('posted') || text.toLowerCase().includes(' ago')) {
+        posted = text.replace(/.*\n/, '').trim(); // Handle potential nested spans
+      } else if (text.length > 0 && !location) {
+        location = text;
+      }
+    });
+
+    // Fallback for posted if not caught by class
+    if (!posted) {
+      $item.find('span._4c50b7df').each(function() {
+        const text = $(this).text().trim();
+        if (text.toLowerCase().includes('posted')) {
+          posted = text;
+          return false; // Stop iterating once found
+        }
+      });
+    }
+
+    // Extract Job Link from the dismiss button's aria-label componentkey
+    // The componentkey on each card matches a URL param; extract the job ID
+    // from anchors inside the card that point to /jobs/view/ or /jobs/search-results/
+    let link = '';
+    
+    // Method 1: look for any anchor whose href contains currentJobId= with a numeric ID
+    $item.find('a[href*="currentJobId="]').each(function() {
+      const href = $(this).attr('href') || '';
+      const match = href.match(/currentJobId=(\d+)/);
+      if (match) {
+        link = 'https://www.linkedin.com/jobs/view/' + match[1];
+        return false;
+      }
+    });
+
+    // Method 2: direct /jobs/view/ link (detail panel or card)
+    if (!link) {
+      const $a = $item.find('a[href*="/jobs/view/"]').first();
+      if ($a.length) {
+        let href = $a.attr('href');
+        if (href.startsWith('/')) href = 'https://www.linkedin.com' + href;
+        link = href.split('?')[0];
+      }
+    }
+
+    // Method 3: data-job-id or entity urn
+    if (!link) {
+      const jobId = $item.attr('data-job-id') || 
+                    $item.find('[data-job-id]').first().attr('data-job-id');
+      if (jobId) {
+        link = 'https://www.linkedin.com/jobs/view/' + jobId;
+      } else {
+        const urn = $item.find('[data-entity-urn]').first().attr('data-entity-urn');
+        if (urn && urn.includes('jobPost:')) {
+          link = 'https://www.linkedin.com/jobs/view/' + urn.split('jobPost:')[1];
+        }
+      }
+    }
+
+    // Method 4: fallback — parse from the page URL if a card is currently selected
+    if (!link) {
+      const pageUrl = window.location.href;
+      const pageMatch = pageUrl.match(/currentJobId=(\d+)/);
+      if (pageMatch) {
+        link = 'https://www.linkedin.com/jobs/view/' + pageMatch[1];
+      }
+    }
+    
+    if (title && (company || location)) {
+      jobs.push({ title, company, location, posted, link });
+    }
+  });
+  
+  return jobs;
+}
 
 // Create observer object used to check company is fetched
 var observer = new MutationObserver(function(mutations) {

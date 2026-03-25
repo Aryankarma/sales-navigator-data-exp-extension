@@ -337,6 +337,62 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
         });
       }
 
+    } else if (request.type === 'extension:jobs:send') {
+      const all_jobs = request.data || [];
+      console.log('[Extension BG] Exporting jobs, count:', all_jobs.length);
+
+      if (all_jobs.length === 0) {
+        console.warn('[Extension BG] No jobs found to export.');
+        if (sender.tab) {
+          chrome.tabs.sendMessage(sender.tab.id, {
+            type: 'jobs:sent',
+            response: { status: { code: 400, message: 'No jobs found on page' } },
+            callback_id: request.callback_id
+          });
+        }
+        return;
+      }
+
+      const header = ['title', 'company', 'location', 'posted', 'link'];
+      const csvRows = [header.join(',')];
+
+      for (const j of all_jobs) {
+        const row = header.map((key) => {
+          const value = j[key] || '';
+          return '"' + String(value).replace(/"/g, '""').replace(/\r?\n|\r/g, ' ') + '"';
+        });
+        csvRows.push(row.join(','));
+      }
+
+      const csv = csvRows.join('\r\n');
+      const url = 'data:text/csv;charset=utf-8,' + encodeURIComponent('\uFEFF' + csv);
+
+      try {
+        await chrome.downloads.download({
+          url,
+          filename: 'linkedin-jobs-export.csv',
+          conflictAction: 'uniquify',
+          saveAs: true
+        });
+
+        if (sender.tab) {
+          chrome.tabs.sendMessage(sender.tab.id, {
+            type: 'jobs:sent',
+            response: { status: { code: 200 } },
+            callback_id: request.callback_id
+          });
+        }
+      } catch (err) {
+        console.error('[Extension BG] Jobs download failed:', err);
+        if (sender.tab) {
+          chrome.tabs.sendMessage(sender.tab.id, {
+            type: 'jobs:sent',
+            response: { status: { code: 500, message: err.message } },
+            callback_id: request.callback_id
+          });
+        }
+      }
+
     } else if (request.type === 'popup:clear_all') {
       usersStore = {};
       companiesStore = {};
