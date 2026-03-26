@@ -9,15 +9,35 @@
         <div class='header'>Export Sales Navigator data</div>
         <div class='content'>
             <div class="description">Select leads or companies on LinkedIn Sales Navigator and use the Export buttons.</div>
-            <div class="status">Saved profiles: <span id="user_count">0</span></div>
-            <div>
-                <button id="download_csv">Download Leads CSV</button>
+
+            <div id="auth_section" class="auth-section">
+                <div class="auth-status">
+                    Auth status: <span id="auth_status">Checking...</span>
+                </div>
+                <div id="user_info" class="user-info"></div>
+                <div id="auth_error" class="auth-error"></div>
+
+                <div class="auth-actions">
+                    <button id="login_btn">Login with Google</button>
+                    <button id="logout_btn" class="logout-btn" style="display:none;">Logout</button>
+                </div>
             </div>
-            <div>
-                <button id="export_all_jobs" class="job-btn">Export Selected Jobs (current page)</button>
-            </div>
-            <div>
-                <button id="clear_data">Clear all saved data</button>
+
+            <div id="authed_content">
+                <div class="status">Saved profiles: <span id="user_count">0</span></div>
+                <div>
+                    <button id="download_csv">Download Leads CSV</button>
+                </div>
+                <div>
+                    <button id="send_to_crm">Send to CRM</button>
+                </div>
+                <div>
+                    <button id="export_all_jobs" class="job-btn">Export Selected Jobs (current page)</button>
+                </div>
+                <div>
+                    <button id="clear_data">Clear all saved data</button>
+                </div>
+                <div id="crm_status" class="crm-status" style="display:none;"></div>
             </div>
         </div>
     </body>

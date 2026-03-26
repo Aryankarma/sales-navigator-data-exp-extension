@@ -96,3 +96,58 @@ button:focus {outline:0;}
 #export_all_jobs:hover {
     background: #2980b9;
 }
+
+.auth-section {
+    margin-top: 10px;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.auth-status {
+    margin: 8px 0 4px;
+    font-size: 14px;
+    font-weight: bold;
+    color: #333;
+    text-align: center;
+}
+
+.user-info {
+    margin: 4px 0 8px;
+    font-size: 13px;
+    color: #555;
+    text-align: center;
+    min-height: 18px;
+}
+
+.auth-error {
+    margin: 8px 0 0;
+    font-size: 12px;
+    color: #c0392b;
+    min-height: 16px;
+    text-align: center;
+}
+
+.auth-actions {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+}
+
+.logout-btn {
+    background: #e74c3c;
+}
+
+.logout-btn:hover {
+    background: #c0392b;
+}
+
+.crm-status {
+    margin: 10px 0 0;
+    font-size: 13px;
+    color: #333;
+    text-align: center;
+    min-height: 18px;
+}

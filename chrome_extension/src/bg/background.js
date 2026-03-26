@@ -1,3 +1,240 @@
+// -----------------------------
+// Cookie-based auth (MV3)
+// -----------------------------
+const AUTH_BASE_URL = 'https://alpha-foundry.alphanext.tech';
+const AUTH_LOGIN_URL = `${AUTH_BASE_URL}/login`;
+const AUTH_ME_URL = `${AUTH_BASE_URL}/api/me`;
+const AUTH_LOGOUT_URL = `${AUTH_BASE_URL}/api/logout`;
+
+const AUTH_POLL_INTERVAL_MS = 2000;
+const AUTH_POLL_TIMEOUT_MS = 120000; // 2 minutes
+const AUTH_STATE_CACHE_TTL_MS = 10000;
+
+let authState = {
+  status: 'unknown', // 'unknown' | 'authenticated' | 'unauthenticated' | 'pending'
+  authenticated: false,
+  user: null,
+  lastCheckedAt: 0,
+  lastError: null
+};
+
+let loginFlowInProgress = false;
+let loginFlowPromise = null;
+let authCheckPromise = null;
+
+function getCurrentAuthState() {
+  return {
+    status: authState.status,
+    authenticated: authState.authenticated,
+    user: authState.user
+  };
+}
+
+function notifyPopupAuthState() {
+  // Note: popup will request state on open; this is best-effort live updates.
+  chrome.runtime.sendMessage({
+    type: 'auth:state_changed',
+    state: getCurrentAuthState()
+  });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTrustedAuthUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.origin === AUTH_BASE_URL;
+  } catch {
+    return false;
+  }
+}
+
+async function parseResponseBody(resp) {
+  const contentType = resp.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) return await resp.json();
+  return await resp.text();
+}
+
+// Always includes cookies (httpOnly) via credentials: 'include'
+// This is the single helper the extension uses for authenticated API calls.
+async function fetchWithAuth(url, options = {}, { handleUnauthorized = true } = {}) {
+  if (!isTrustedAuthUrl(url)) {
+    const err = new Error('Untrusted URL');
+    err.code = 'UNTRUSTED_URL';
+    throw err;
+  }
+
+  const resp = await fetch(url, {
+    ...options,
+    credentials: 'include',
+    headers: {
+      'content-type': 'application/json',
+      ...(options.headers || {})
+    }
+  });
+
+  if (resp.status === 401) {
+    if (handleUnauthorized) {
+      authState = {
+        status: 'unauthenticated',
+        authenticated: false,
+        user: null,
+        lastCheckedAt: Date.now(),
+        lastError: 'unauthorized'
+      };
+      notifyPopupAuthState();
+      const err = new Error('Unauthorized');
+      err.code = 'UNAUTHORIZED';
+      throw err;
+    }
+    return resp;
+  }
+
+  return resp;
+}
+
+async function checkAuthState({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && now - authState.lastCheckedAt < AUTH_STATE_CACHE_TTL_MS && authState.status !== 'unknown') {
+    return getCurrentAuthState();
+  }
+
+  if (authCheckPromise) return authCheckPromise;
+
+  authCheckPromise = (async () => {
+    try {
+      const resp = await fetchWithAuth(AUTH_ME_URL, { method: 'GET' });
+      const user = await parseResponseBody(resp);
+      authState = {
+        status: 'authenticated',
+        authenticated: true,
+        user,
+        lastCheckedAt: Date.now(),
+        lastError: null
+      };
+      return getCurrentAuthState();
+    } catch (err) {
+      // fetchWithAuth already marks unauthenticated on 401.
+      if (err && err.code === 'UNAUTHORIZED') {
+        return getCurrentAuthState();
+      }
+
+      authState = {
+        status: 'unauthenticated',
+        authenticated: false,
+        user: null,
+        lastCheckedAt: Date.now(),
+        lastError: err?.message || 'auth_check_failed'
+      };
+      notifyPopupAuthState();
+      return getCurrentAuthState();
+    } finally {
+      authCheckPromise = null;
+    }
+  })();
+
+  return authCheckPromise;
+}
+
+async function performLoginAndWait() {
+  if (loginFlowInProgress) return loginFlowPromise;
+  loginFlowInProgress = true;
+
+  authState = {
+    status: 'pending',
+    authenticated: false,
+    user: null,
+    lastCheckedAt: Date.now(),
+    lastError: null
+  };
+  notifyPopupAuthState();
+
+  // Open web app login page in a new tab.
+  await chrome.tabs.create({ url: AUTH_LOGIN_URL });
+
+  loginFlowPromise = (async () => {
+    const start = Date.now();
+    while (Date.now() - start < AUTH_POLL_TIMEOUT_MS) {
+      try {
+        // Polling works regardless of how Better Auth redirects.
+        // During login, 401 is expected; we avoid flipping auth state away from 'pending'.
+        const resp = await fetchWithAuth(AUTH_ME_URL, { method: 'GET' }, { handleUnauthorized: false });
+
+        if (resp.status === 401) {
+          await delay(AUTH_POLL_INTERVAL_MS);
+          continue;
+        }
+
+        if (!resp.ok) {
+          await delay(AUTH_POLL_INTERVAL_MS);
+          continue;
+        }
+
+        const user = await parseResponseBody(resp);
+        authState = {
+          status: 'authenticated',
+          authenticated: true,
+          user,
+          lastCheckedAt: Date.now(),
+          lastError: null
+        };
+        notifyPopupAuthState();
+        return getCurrentAuthState();
+      } catch (err) {
+        // Network/CORS/etc. Keep polling until timeout.
+      }
+    }
+
+    authState = {
+      status: 'unauthenticated',
+      authenticated: false,
+      user: null,
+      lastCheckedAt: Date.now(),
+      lastError: 'login_timeout'
+    };
+    notifyPopupAuthState();
+    return getCurrentAuthState();
+  })();
+
+  try {
+    return await loginFlowPromise;
+  } finally {
+    loginFlowInProgress = false;
+    loginFlowPromise = null;
+  }
+}
+
+async function performLogout() {
+  try {
+    // Prefer POST; fallback to GET if your backend expects that.
+    const resp = await fetchWithAuth(AUTH_LOGOUT_URL, { method: 'POST' }).catch(async () => {
+      return await fetchWithAuth(AUTH_LOGOUT_URL, { method: 'GET' });
+    });
+
+    if (resp && resp.status !== 204) {
+      // We don't need response body for logout; but parse to consume stream.
+      await parseResponseBody(resp);
+    }
+  } catch (err) {
+    // 401 is fine; it just means user is already logged out.
+  }
+
+  authState = {
+    status: 'unauthenticated',
+    authenticated: false,
+    user: null,
+    lastCheckedAt: Date.now(),
+    lastError: null
+  };
+  notifyPopupAuthState();
+  return getCurrentAuthState();
+}
+
+// -----------------------------
+// Persistent stores (existing)
+// -----------------------------
 // Persistent stores using chrome.storage.local
 let usersStore = {};
 let companiesStore = {};
@@ -16,6 +253,57 @@ async function syncToStorage() {
 
 chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
   (async () => {
+    if (request.type === 'auth:get_state') {
+      const state = await checkAuthState({ force: request.data && request.data.force === true });
+      sendResponse(state);
+      return;
+    }
+
+    if (request.type === 'auth:login') {
+      // Start login flow; popup will receive `auth:state_changed` updates.
+      void performLoginAndWait().catch(() => {});
+      sendResponse({ ok: true, state: getCurrentAuthState() });
+      return;
+    }
+
+    if (request.type === 'auth:logout') {
+      const state = await performLogout();
+      sendResponse({ ok: true, state });
+      return;
+    }
+
+    // Generic authenticated API bridge for extension pages.
+    // Usage example (from popup or content scripts):
+    // chrome.runtime.sendMessage({ type:'auth:fetch', data:{ path:'/api/data', method:'POST', body:{...} } })
+    if (request.type === 'auth:fetch') {
+      const { path, url, method = 'GET', body, headers } = request.data || {};
+
+      const targetUrl = url || (path ? `${AUTH_BASE_URL}${path}` : null);
+      if (!targetUrl || !isTrustedAuthUrl(targetUrl)) {
+        sendResponse({ ok: false, status: 400, error: 'Invalid target URL' });
+        return;
+      }
+
+      const fetchOptions = {
+        method: method.toUpperCase(),
+        headers: headers || {}
+      };
+      if (body !== undefined && body !== null) fetchOptions.body = JSON.stringify(body);
+
+      try {
+        const resp = await fetchWithAuth(targetUrl, fetchOptions);
+        const data = resp.status === 204 ? null : await parseResponseBody(resp);
+        sendResponse({ ok: resp.ok, status: resp.status, data });
+      } catch (err) {
+        if (err && err.code === 'UNAUTHORIZED') {
+          sendResponse({ ok: false, status: 401, error: 'Unauthorized', loggedOut: true });
+          return;
+        }
+        sendResponse({ ok: false, status: 500, error: err?.message || 'auth_fetch_failed' });
+      }
+      return;
+    }
+
     if (request.type === 'extension:lead:add') {
       const lead = request.data;
       console.log('[Extension BG] Lead added:', lead.name, '| Store count:', Object.keys(usersStore).length + 1);
@@ -222,6 +510,32 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
           });
         }
       }
+
+    } else if (request.type === 'popup:export_leads_csv_data') {
+      const all_users = Object.values(usersStore);
+      if (all_users.length === 0) {
+        sendResponse({ ok: false, error: 'No leads selected' });
+        return;
+      }
+
+      const header = ['name', 'title', 'company', 'company_id', 'location', 'about', 'tenure', 'profile_url'];
+      const csvRows = [header.join(',')];
+
+      for (const u of all_users) {
+        const row = header.map((key) => {
+          let value;
+          if (key === 'profile_url') {
+            value = u['profile_id'] ? 'https://www.linkedin.com/sales/lead/' + u['profile_id'] : '';
+          } else {
+            value = u[key] || '';
+          }
+          return '"' + String(value).replace(/"/g, '""').replace(/\r?\n|\r/g, ' ') + '"';
+        });
+        csvRows.push(row.join(','));
+      }
+
+      const csv = '\uFEFF' + csvRows.join('\r\n');
+      sendResponse({ ok: true, csv });
 
     } else if (request.type === 'popup:download_csv') {
       const all_users = Object.values(usersStore);
