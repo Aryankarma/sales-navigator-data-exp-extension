@@ -24,6 +24,18 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
     sendResponse({ ok: true, count: jobs.length });
   }
 
+  // Scrape selected jobs for CRM send (no download)
+  if (request.type === 'popup:get_jobs_data') {
+    try {
+      const jobs = scrape_all_jobs();
+      console.log('[Extension] Jobs data for CRM:', jobs.length);
+      sendResponse({ ok: true, count: jobs.length, jobs });
+    } catch (e) {
+      console.error('[Extension] Failed to scrape jobs for CRM:', e);
+      sendResponse({ ok: false, error: (e && e.message) ? e.message : 'Failed to scrape jobs' });
+    }
+  }
+
   return true;
 });
 
@@ -31,67 +43,521 @@ function get_jobs_container() {
   let container = $('[componentkey="SearchResultsMainContent"]');
   if (container.length === 0) container = $('[data-testid="lazy-column"]');
   if (container.length === 0) container = $('.scaffold-layout__list');
+  if (container.length === 0) container = $('main');
   if (container.length === 0) container = $('body'); // robust fallback
   return container;
 }
 
+/**
+ * New LinkedIn jobs feed: cards are `div[role="button"][componentkey]` with a dismiss
+ * button `aria-label="Dismiss … job"` and often no in-card `/jobs/view/` link.
+ */
+function is_job_dismiss_btn(el) {
+  var lab = $(el).attr('aria-label') || '';
+  return /\bjob\b/i.test(lab);
+}
+
+/**
+ * From a dismiss button, find the single job card root.
+ *
+ * New LinkedIn jobs UI: each job is a `div[role="button"][componentkey]` that
+ * wraps exactly one Dismiss button. We walk UP ancestors that have role="button"
+ * and componentkey, picking the INNERMOST (lowest in the tree) one that only
+ * contains a single job-dismiss — that's the card shell for this job.
+ */
+function card_root_from_job_dismiss_btn(btn) {
+  var $btn = $(btn);
+
+  // Collect all ancestors with role="button" and componentkey, from closest outward
+  var candidates = [];
+  $btn.parents('div[role="button"][componentkey]').each(function () {
+    candidates.push(this);
+  });
+
+  // Pick the innermost (first) one that contains exactly 1 job-dismiss btn
+  for (var i = 0; i < candidates.length; i++) {
+    var $c = $(candidates[i]);
+    var n = $c.find('button[aria-label*="Dismiss"]').filter(is_job_dismiss_btn).length;
+    if (n === 1) return $c;
+  }
+
+  // Fallback: classic li-based card (older LinkedIn)
+  var $li = $btn.closest(
+    'li[data-occludable-job-id], li.jobs-search-results__list-item, li.scaffold-layout__list-item',
+  );
+  if ($li.length) return $li;
+
+  // Fallback: data-view-name leaf
+  var cards = $btn.parents('div[data-view-name="job-card"]');
+  if (cards.length) return $(cards[0]);
+
+  // Last resort: any role=button+componentkey ancestor
+  if (candidates.length) return $(candidates[0]);
+
+  return $();
+}
+
+/**
+ * One root per visible job (deduped by DOM node).
+ */
+function get_job_cards_via_dismiss_buttons(container) {
+  var seen = Object.create(null);
+  var roots = [];
+  container.find('button[aria-label*="Dismiss"]').each(function () {
+    if (!is_job_dismiss_btn(this)) return;
+    var $card = card_root_from_job_dismiss_btn(this);
+    if (!$card.length) return;
+    var el = $card[0];
+    if (seen[el]) return;
+    seen[el] = true;
+    roots.push(el);
+  });
+  return $(roots);
+}
+
 function get_job_items(container) {
-  var items = container.find('div[role="button"][componentkey]');
-  if (items.length === 0) {
-    items = container.find('.f55dc56d').closest('div._4ac719f8.d578948b');
+  // Primary: dismiss-button based detection (works for current LinkedIn jobs UI)
+  var items = get_job_cards_via_dismiss_buttons(container);
+  if (items.length > 0) return items;
+
+  // Classic: li-based job list
+  items = container.find(
+    'li.jobs-search-results__list-item, li.scaffold-layout__list-item, li[data-occludable-job-id]',
+  );
+  if (items.length > 0) return items;
+
+  // data-view-name cards (older UI)
+  var $jobCards = container.find('div[data-view-name="job-card"]');
+  var leaves = $jobCards.filter(function () {
+    return $(this).find('div[data-view-name="job-card"]').length === 0;
+  });
+  if (leaves.length > 0) return leaves;
+  if ($jobCards.length > 0) return $jobCards;
+
+  // Fallback: role=button+componentkey divs that look like jobs
+  items = container
+    .find('div[role="button"][componentkey]')
+    .filter(function () {
+      var $el = $(this);
+      if ($el.parents('div[role="button"][componentkey]').length > 0) return false; // skip nested
+      return (
+        $el.find('a[href*="/jobs/view/"], a[href*="currentJobId="]').length > 0 ||
+        $el.find('[data-job-id]').length > 0 ||
+        $el.find('button[aria-label*="Dismiss"]').filter(function () {
+          return /\bjob\b/i.test($(this).attr('aria-label') || '');
+        }).length > 0
+      );
+    });
+  if (items.length > 0) return items;
+
+  return $();
+}
+
+var jobsInjectTimer = null;
+var jobsDomObserver = null;
+
+function schedule_jobs_inject() {
+  if (jobsInjectTimer) clearTimeout(jobsInjectTimer);
+  jobsInjectTimer = setTimeout(function () {
+    jobsInjectTimer = null;
+    inject_job_extract_buttons();
+  }, 200);
+}
+
+function disconnect_jobs_dom_observer() {
+  if (jobsDomObserver) {
+    jobsDomObserver.disconnect();
+    jobsDomObserver = null;
   }
-  if (items.length === 0) {
-    items = container.find('div[data-view-name="job-card"]');
+}
+
+function ensure_jobs_dom_observer() {
+  if (!window.location.href.includes('/jobs/')) {
+    disconnect_jobs_dom_observer();
+    return;
   }
-  return items;
+  if (jobsDomObserver) return;
+  var target = get_jobs_container().get(0) || document.body;
+  try {
+    jobsDomObserver = new MutationObserver(function () {
+      schedule_jobs_inject();
+    });
+    jobsDomObserver.observe(target, { childList: true, subtree: true });
+  } catch (e) {
+    console.warn('[Extension] jobs observer failed', e);
+  }
+}
+
+function make_extract_btn($item) {
+  var $btn = $('<div/>').addClass('extension-individual-button available jobs-extract-btn').html('Extract');
+  $btn.css({
+    margin: '0 0 0 8px',
+    'font-size': '12px',
+    padding: '4px 10px',
+    'border-radius': '4px',
+    background: '#fff',
+    border: '1px solid #0073b1',
+    color: '#0073b1',
+    cursor: 'pointer',
+    'font-weight': '600',
+    'z-index': '9999',
+    position: 'relative',
+    'line-height': '1.2',
+    'box-sizing': 'border-box',
+    'min-height': '26px',
+    display: 'inline-flex',
+    'align-items': 'center',
+  });
+  $btn.on('mousedown', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+    $btn.on('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var $b = $(e.currentTarget);
+      if ($b.hasClass('added')) {
+        $b.removeClass('added').addClass('available').html('Extract').css({ background: '#fff', color: '#0073b1', border: '1px solid #0073b1' });
+        $b.removeData('captured-link');
+      } else {
+        $b.removeClass('available').addClass('added').html('Selected').css({ background: '#0073b1', color: '#fff', border: '1px solid #0073b1' });
+        // Capture the currentJobId from the page URL at selection time.
+        // When a user clicks a job card on LinkedIn, the URL updates to include
+        // currentJobId=XXXXX. Since our button is inside the card, clicking it
+        // also activates that card, so the URL reflects this specific job.
+        var pageMatch = window.location.href.match(/currentJobId=(\d+)/);
+        if (pageMatch) {
+          $b.data('captured-link', 'https://www.linkedin.com/jobs/view/' + pageMatch[1]);
+        }
+      }
+    });
+  return $btn;
+}
+
+function inject_job_extract_buttons() {
+  if (!window.location.href.includes('/jobs/')) return;
+
+  $('button[aria-label*="Dismiss"]').each(function () {
+    var $dismiss = $(this);
+
+    // Must be a job dismiss (aria-label contains "job")
+    if (!/\bjob\b/i.test($dismiss.attr('aria-label') || '')) return;
+
+    // PRIMARY GUARD: stamp the dismiss button itself so we never process it twice.
+    // This is reliable regardless of card-root detection success/failure.
+    if ($dismiss.data('ext-injected')) return;
+    $dismiss.data('ext-injected', true);
+
+    var $parent = $dismiss.parent();
+
+    // Make sure parent row is flex so button sits inline
+    $parent.css({
+      display: 'inline-flex',
+      'align-items': 'center',
+      'flex-wrap': 'wrap',
+      gap: '6px',
+    });
+
+    // Find the card root for scraping purposes
+    var $card = card_root_from_job_dismiss_btn(this);
+    if (!$card.length) $card = $dismiss.parents('div[role="button"][componentkey]').first();
+
+    var $btn = make_extract_btn($card.length ? $card : $dismiss.closest('div'));
+    $parent.append($btn);
+
+    // Mark the card so scraping works
+    if ($card.length && !$card.hasClass('extension-init')) {
+      $card.addClass('extension-init');
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Select All / Deselect All master button (jobs + leads + company pages)
+// ---------------------------------------------------------------------------
+function ensure_select_all_button() {
+  // Already in the live DOM? Nothing to do.
+  if (document.getElementById('ext-select-all-btn')) return;
+
+  var btn = document.createElement('button');
+  btn.id = 'ext-select-all-btn';
+  btn.textContent = 'Select All';
+  btn.setAttribute('style', [
+    'position:fixed',
+    'bottom:20px',
+    'left:20px',
+    'z-index:2147483647',
+    'padding:10px 22px',
+    'border-radius:6px',
+    'background:#0073b1',
+    'color:#fff',
+    'border:none',
+    'font-size:13px',
+    'font-weight:700',
+    'cursor:pointer',
+    'box-shadow:0 2px 10px rgba(0,0,0,0.35)',
+    'font-family:-apple-system,BlinkMacSystemFont,sans-serif',
+    'transition:background 0.15s',
+    'letter-spacing:0.01em',
+    'display:block',
+    'visibility:visible',
+    'opacity:1',
+  ].join(';'));
+
+  btn.addEventListener('mouseenter', function () { this.style.opacity = '0.85'; });
+  btn.addEventListener('mouseleave', function () { this.style.opacity = '1'; });
+
+  btn.addEventListener('click', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+
+    var isJobs = window.location.href.includes('/jobs/');
+    var selector = isJobs ? '.jobs-extract-btn' : '.extension-individual-button';
+
+    var allBtns = document.querySelectorAll(selector);
+    if (allBtns.length === 0) return;
+
+    var selectedCount = document.querySelectorAll(selector + '.added').length;
+    var allSelected = selectedCount === allBtns.length;
+
+    if (allSelected) {
+      // Trigger click on every selected button to deselect — this fires all
+      // background remove messages via the existing per-button click handlers.
+      allBtns.forEach(function (b) {
+        if (b.classList.contains('added')) {
+          b.click();
+        }
+      });
+      btn.textContent = 'Select All';
+      btn.style.background = '#0073b1';
+    } else {
+      // Trigger click on every unselected button to select — fires all
+      // background add messages via the existing per-button click handlers.
+      allBtns.forEach(function (b) {
+        if (b.classList.contains('available')) {
+          b.click();
+        }
+      });
+      btn.textContent = 'Deselect All';
+      btn.style.background = '#c0392b';
+    }
+  });
+
+  document.body.appendChild(btn);
+}
+
+/** True if the user marked this row via our Extract button or LinkedIn's list checkbox. */
+function job_row_is_selected($item) {
+  if ($item.find('.jobs-extract-btn.added').length > 0) return true;
+  var $cb = $item.find('input[type="checkbox"]').first();
+  if ($cb.length && $cb.prop('checked')) return true;
+  if ($item.find('[role="checkbox"][aria-checked="true"]').length > 0) return true;
+  return false;
+}
+
+function scrape_job_title_company_location_posted($item) {
+  var title = '';
+  var $dismiss = $item
+    .find('button[aria-label*="Dismiss"]')
+    .filter(function () {
+      return /\bjob\b/i.test($(this).attr('aria-label') || '');
+    })
+    .first();
+  if ($dismiss.length) {
+    var lab = $dismiss.attr('aria-label') || '';
+    var dm = lab.match(/^Dismiss\s+(.+?)\s+job\s*$/i);
+    if (dm && dm[1]) title = dm[1].replace(/\s+/g, ' ').trim();
+  }
+
+  if (!title) {
+    title =
+      $item.find('.f55dc56d span._4c50b7df').first().text().trim() ||
+      $item.find('.f55dc56d').first().text().trim();
+  }
+  if (!title) {
+    title = $item
+      .find(
+        'a.job-card-container__link, .job-card-list__title, h3 a, h3, [data-testid="job-card-title"]',
+      )
+      .first()
+      .text()
+      .trim();
+  }
+  if (!title) {
+    title = $item.find('a[href*="/jobs/view/"]').first().text().trim();
+  }
+
+  function is_likely_results_count_or_noise(t) {
+    if (!t) return true;
+    if (/^\d+\s*\+?\s*results?$/i.test(t)) return true;
+    if (/^99\+/i.test(t)) return true;
+    if (/\d+\s*\+\s*results?/i.test(t)) return true;
+    if (/are these results helpful/i.test(t)) return true;
+    return false;
+  }
+
+  // New feed: company sits in div.a390a9fc > p without class a390a9fc on the p; location line uses p.a390a9fc.
+  var $companyP = $item.find('div.a390a9fc > p').filter(function () {
+    return !$(this).hasClass('a390a9fc');
+  }).first();
+  var company = ($companyP.length && $companyP.text().trim()) || '';
+  if (is_likely_results_count_or_noise(company)) company = '';
+
+  if (!company) {
+    company = $item.find('._41247193').first().text().trim();
+  }
+  if (!company || is_likely_results_count_or_noise(company)) {
+    company = $item
+      .find(
+        '.artdeco-entity-lockup__subtitle, [data-testid="company-name"], .job-card-container__primary-description',
+      )
+      .first()
+      .text()
+      .trim();
+  }
+  if (is_likely_results_count_or_noise(company)) company = '';
+
+  var location = '';
+  var posted = '';
+
+  if (!company || !location) {
+    var paras = [];
+    $item.find('p').each(function () {
+      var t = $(this).text().replace(/\s+/g, ' ').trim();
+      if (
+        !t ||
+        t === title ||
+        is_likely_results_count_or_noise(t) ||
+        /^posted\b/i.test(t) ||
+        /\beasy apply\b/i.test(t) ||
+        /\balumni\b/i.test(t) ||
+        /\bworks here\b/i.test(t) ||
+        /^\s*·\s*$/.test(t) ||
+        /days ago\s*$/i.test(t)
+      ) {
+        return;
+      }
+      if (paras.indexOf(t) === -1) paras.push(t);
+    });
+    if (!company && paras.length) company = paras[0];
+    if (!location && paras.length > 1) {
+      for (var pi = 1; pi < paras.length; pi++) {
+        var cand = paras[pi];
+        if (cand === company) continue;
+        if (/on-?site|remote|hybrid|,|\(/.test(cand) || cand.length < 80) {
+          location = cand;
+          break;
+        }
+      }
+    }
+  }
+
+  $item.find('.ad75f074').each(function () {
+    var text = $(this).text().trim();
+    if (text.toLowerCase().includes('posted') || text.toLowerCase().includes(' ago')) {
+      posted = text.replace(/.*\n/, '').trim();
+    } else if (text.length > 0 && !location) {
+      location = text;
+    }
+  });
+  if (!location) {
+    location = $item
+      .find(
+        '.job-card-container__metadata-item, [data-testid="job-card-location"], .job-card-list__metadata-item',
+      )
+      .first()
+      .text()
+      .trim();
+  }
+  if (!posted) {
+    $item.find('span._4c50b7df').each(function () {
+      var text = $(this).text().trim();
+      if (text.toLowerCase().includes('posted')) {
+        posted = text;
+        return false;
+      }
+    });
+  }
+  if (!posted) {
+    $item.find('span').each(function () {
+      var text = $(this).text().replace(/\s+/g, ' ').trim();
+      if (/^posted\b/i.test(text)) {
+        posted = text;
+        return false;
+      }
+    });
+  }
+
+  return { title: title, company: company, location: location, posted: posted };
 }
 
 // Scraper for Job Search results
 function scrape_all_jobs() {
   const jobs = [];
+
+  // Find all selected extract buttons directly — no card detection needed.
+  // Each button is inside the dismiss-row of a specific job card.
+  // Walk up to the card root for scraping.
+  $('.jobs-extract-btn.added').each(function() {
+    var $btn = $(this);
+    // Find the enclosing card: nearest role=button+componentkey ancestor, or fallback
+    var $item = $btn.parents('div[role="button"][componentkey]').first();
+    if (!$item.length) $item = $btn.closest('[data-view-name="job-card"]');
+    if (!$item.length) $item = $btn.parent();
+
+    var fields = scrape_job_title_company_location_posted($item);
+    var title = fields.title;
+    var company = fields.company;
+    var location = fields.location;
+    var posted = fields.posted;
+    let link = '';
+
+    // Method 0: link captured at selection time (currentJobId from URL when user clicked the card)
+    var capturedLink = $btn.data('captured-link');
+    if (capturedLink) { link = capturedLink; }
+
+    // Method 1: anchor with currentJobId param inside the card
+    if (!link) {
+      $item.find('a[href*="currentJobId="]').each(function() {
+        const href = $(this).attr('href') || '';
+        const match = href.match(/currentJobId=(\d+)/);
+        if (match) { link = 'https://www.linkedin.com/jobs/view/' + match[1]; return false; }
+      });
+    }
+    // Method 2: direct /jobs/view/ anchor
+    if (!link) {
+      const $a = $item.find('a[href*="/jobs/view/"]').first();
+      if ($a.length) { let href = $a.attr('href') || ''; if (href.startsWith('/')) href = 'https://www.linkedin.com' + href; link = href.split('?')[0]; }
+    }
+    // Method 3: data-job-id attribute
+    if (!link) {
+      const jobId = $item.attr('data-job-id') || $item.find('[data-job-id]').first().attr('data-job-id');
+      if (jobId) link = 'https://www.linkedin.com/jobs/view/' + jobId;
+    }
+    // NOTE: No page-URL fallback — that gives all cards the same link and triggers
+    // the unique-index deduplication on the server, causing only 1 row to be saved.
+
+    if (title || company || location || link) {
+      jobs.push({ title: title || 'Job', company: company || '', location: location || '', posted: posted || '', link: link || '' });
+    }
+  });
+
+  if (jobs.length > 0) return jobs;
+
+  // Legacy fallback path (older LinkedIn layouts)
   let container = get_jobs_container();
-  
-  if (container.length === 0) {
-    console.warn('[Extension] Jobs container not found');
-    return jobs;
-  }
+  if (container.length === 0) { console.warn('[Extension] Jobs container not found'); return jobs; }
 
   get_job_items(container).each(function() {
     const $item = $(this);
-    
-    // Only scrape if the button is in 'added' selected state
-    if ($item.find('.jobs-extract-btn.added').length === 0) return;
 
-    // Title: usually in a p with class f55dc56d
-    const title = $item.find('.f55dc56d').find('span._4c50b7df').first().text().trim() || 
-                  $item.find('.f55dc56d').text().trim();
-    
-    // Company: resides in class _41247193
-    const company = $item.find('._41247193').first().text().trim();
-    
-    // Location and Posted often share classes like ad75f074
-    let location = '';
-    let posted = '';
-    
-    $item.find('.ad75f074').each(function() {
-      const text = $(this).text().trim();
-      if (text.toLowerCase().includes('posted') || text.toLowerCase().includes(' ago')) {
-        posted = text.replace(/.*\n/, '').trim(); // Handle potential nested spans
-      } else if (text.length > 0 && !location) {
-        location = text;
-      }
-    });
+    if (!job_row_is_selected($item)) return;
 
-    // Fallback for posted if not caught by class
-    if (!posted) {
-      $item.find('span._4c50b7df').each(function() {
-        const text = $(this).text().trim();
-        if (text.toLowerCase().includes('posted')) {
-          posted = text;
-          return false; // Stop iterating once found
-        }
-      });
-    }
+    var fields = scrape_job_title_company_location_posted($item);
+    var title = fields.title;
+    var company = fields.company;
+    var location = fields.location;
+    var posted = fields.posted;
 
     // Extract Job Link from the dismiss button's aria-label componentkey
     // The componentkey on each card matches a URL param; extract the job ID
@@ -112,7 +578,7 @@ function scrape_all_jobs() {
     if (!link) {
       const $a = $item.find('a[href*="/jobs/view/"]').first();
       if ($a.length) {
-        let href = $a.attr('href');
+        let href = $a.attr('href') || '';
         if (href.startsWith('/')) href = 'https://www.linkedin.com' + href;
         link = href.split('?')[0];
       }
@@ -132,17 +598,17 @@ function scrape_all_jobs() {
       }
     }
 
-    // Method 4: fallback — parse from the page URL if a card is currently selected
-    if (!link) {
-      const pageUrl = window.location.href;
-      const pageMatch = pageUrl.match(/currentJobId=(\d+)/);
-      if (pageMatch) {
-        link = 'https://www.linkedin.com/jobs/view/' + pageMatch[1];
-      }
-    }
+    // NOTE: No page-URL fallback here either — same deduplication problem.
     
-    if (title && (company || location)) {
-      jobs.push({ title, company, location, posted, link });
+    // Include row if we can identify the job (link is enough when LI changes title/company classes).
+    if (title || company || location || link) {
+      jobs.push({
+        title: title || 'Job',
+        company: company || '',
+        location: location || '',
+        posted: posted || '',
+        link: link || '',
+      });
     }
   });
   
@@ -442,8 +908,6 @@ function individual_finder_tick() {
   if (window.location.href.includes('/search/company')) {
     // Company search page
     $('.artdeco-list__item').each(function() {
-      if ($(this).hasClass('extension-init')) return;
-
       if ($(this).find('[data-x-search-result="ACCOUNT"]').length === 0) return;
 
       var $item = $(this);
@@ -453,6 +917,9 @@ function individual_finder_tick() {
         return;
       }
 
+      // Guard on the actions container itself
+      if (actions.data('ext-injected')) return;
+
       var company_data = scrape_company_from_row($item);
       if (!company_data.company_id || !company_data.name) {
         console.warn('[Extension] Could not scrape company_id or name — skipping row. href was:',
@@ -460,7 +927,7 @@ function individual_finder_tick() {
         return;
       }
 
-      $item.addClass('extension-init');
+      actions.data('ext-injected', true);
 
       var $btn = $('<div/>').addClass('extension-individual-button available').html('Export');
 
@@ -497,60 +964,30 @@ function individual_finder_tick() {
     });
 
   } else if (window.location.href.includes('/jobs/')) {
-    // Jobs page
-    let container = get_jobs_container();
-    if (container.length === 0) return;
-
-    get_job_items(container).each(function() {
-      if ($(this).hasClass('extension-init')) return;
-      $(this).addClass('extension-init');
-
-      var $item = $(this);
-      
-      var $btn = $('<div/>').addClass('extension-individual-button available jobs-extract-btn').html('Extract');
-      $btn.css({'margin': '8px', 'font-size': '12px', 'padding': '4px 8px', 'border-radius': '4px', 'background': '#fff', 'border': '1px solid #0073b1', 'color': '#0073b1', 'cursor': 'pointer', 'display': 'inline-block', 'font-weight': '600', 'z-index': '9999', 'position': 'relative'});
-      
-      $btn.on('click', function(e) {
-        e.preventDefault();
-        e.stopPropagation();
-        var $b = $(e.currentTarget);
-        if ($b.hasClass('added')) {
-          $b.removeClass('added').addClass('available').html('Extract').css({'background': '#fff', 'color': '#0073b1'});
-        } else {
-          $b.removeClass('available').addClass('added').html('Selected').css({'background': '#0073b1', 'color': '#fff'});
-        }
-      });
-      
-      var footer = $item.find('._030d77d9').last();
-      if (footer.length === 0) {
-        footer = $item.find('.job-card-container__metadata-wrapper, .job-card-container__footer-item').last();
-      }
-      
-      if (footer.length > 0) {
-        footer.append($btn);
-      } else {
-        $item.append($btn);
-      }
-    });
+    ensure_jobs_dom_observer();
+    inject_job_extract_buttons();
 
   } else {
+    disconnect_jobs_dom_observer();
     // People / leads search page - scrape directly from DOM
     $('.artdeco-list__item').each(function() {
-      if ($(this).hasClass('extension-init')) return;
-
       if ($(this).find('[data-x-search-result="LEAD"]').length === 0) return;
 
       var $item = $(this);
       var actions = $item.find('[data-x-search-result="LEAD"]').find('.mt2.mr5').children('ul').first();
       if (!actions.length) return;
 
+      // Guard on the actions <ul> itself — survives re-renders better than
+      // a class on the outer list item which LinkedIn may recreate entirely.
+      if (actions.data('ext-injected')) return;
+      actions.data('ext-injected', true);
+
       var lead_data = scrape_lead_from_row($item);
       if (!lead_data.profile_id || !lead_data.name) {
         console.warn('[Extension] Could not scrape lead profile_id or name from row');
+        actions.removeData('ext-injected'); // allow retry once data is ready
         return;
       }
-
-      $item.addClass('extension-init');
 
       var $btn = $('<div/>').addClass('extension-individual-button available').html('Export');
 
@@ -586,6 +1023,8 @@ function individual_finder_tick() {
       console.log('[Extension] Export button added for lead:', lead_data.name, '| ID:', lead_data.profile_id);
     });
   }
+
+  ensure_select_all_button();
 }
 
 var last_url = window.location.href;
@@ -593,8 +1032,32 @@ var last_url = window.location.href;
 setInterval(function() {
   if (last_url != window.location.href) {
     if (extension_button_int) clearInterval(extension_button_int);
-    setTimeout(function() { start_check(); }, 300);
+    disconnect_jobs_dom_observer();
+    // Remove select-all button on every navigation so it re-creates fresh
+    var stale = document.getElementById('ext-select-all-btn');
+    if (stale) stale.parentNode.removeChild(stale);
+    setTimeout(function () {
+      start_check();
+    }, 300);
   }
   last_url = window.location.href;
   individual_finder_tick();
+  sync_select_all_button_label();
 }, 1000);
+
+function sync_select_all_button_label() {
+  var masterBtn = document.getElementById('ext-select-all-btn');
+  if (!masterBtn) return;
+  var isJobs = window.location.href.includes('/jobs/');
+  var selector = isJobs ? '.jobs-extract-btn' : '.extension-individual-button';
+  var allBtns = document.querySelectorAll(selector);
+  if (allBtns.length === 0) return;
+  var addedCount = document.querySelectorAll(selector + '.added').length;
+  if (addedCount === allBtns.length) {
+    masterBtn.textContent = 'Deselect All';
+    masterBtn.style.background = '#c0392b';
+  } else {
+    masterBtn.textContent = 'Select All';
+    masterBtn.style.background = '#0073b1';
+  }
+}

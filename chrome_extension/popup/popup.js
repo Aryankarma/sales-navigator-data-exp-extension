@@ -20,11 +20,13 @@ function extractDisplayName(user) {
 function setAuthedButtonsEnabled(enabled) {
   const downloadBtn = document.getElementById('download_csv');
   const exportJobsBtn = document.getElementById('export_all_jobs');
+  const sendJobsBtn = document.getElementById('send_jobs_to_crm');
   const clearDataBtn = document.getElementById('clear_data');
   const sendCrmBtn = document.getElementById('send_to_crm');
 
   if (downloadBtn) downloadBtn.disabled = !enabled;
   if (exportJobsBtn) exportJobsBtn.disabled = !enabled;
+  if (sendJobsBtn) sendJobsBtn.disabled = !enabled;
   if (clearDataBtn) clearDataBtn.disabled = !enabled;
   if (sendCrmBtn) sendCrmBtn.disabled = !enabled;
 }
@@ -78,6 +80,7 @@ function setAuthUI(state) {
 
 const API_BASE_URL = 'https://alpha-foundry.alphanext.tech';
 const CRM_IMPORT_URL = `${API_BASE_URL}/api/crm/import`;
+const CRM_IMPORT_JOBS_URL = `${API_BASE_URL}/api/crm/import/jobs`;
 // Backend enforces MAX_CSV_BYTES = 2 * 1024 * 1024 (UTF-8 bytes)
 // Add more headroom and split big exports to avoid upstream request-size/timeouts
 // that can surface as 503.
@@ -160,7 +163,40 @@ async function getLeadsCsvData() {
   });
 }
 
-async function sendCsvToBackend(csvData) {
+function escapeCsvCell(value) {
+  const v = value === null || value === undefined ? '' : String(value);
+  return '"' + v.replace(/"/g, '""').replace(/\r?\n|\r/g, ' ') + '"';
+}
+
+function jobsToCsv(jobs) {
+  const header = ['title', 'company', 'location', 'posted', 'link'];
+  const rows = [header.join(',')];
+  for (const j of (jobs || [])) {
+    const row = header.map((k) => escapeCsvCell(j?.[k] || ''));
+    rows.push(row.join(','));
+  }
+  return rows.join('\r\n');
+}
+
+async function getJobsDataFromActiveTab() {
+  return new Promise((resolve) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (!tabs || !tabs[0] || !tabs[0].id) {
+        resolve({ ok: false, error: 'No active tab found' });
+        return;
+      }
+      chrome.tabs.sendMessage(tabs[0].id, { type: 'popup:get_jobs_data' }, (resp) => {
+        if (!resp) {
+          resolve({ ok: false, error: 'Failed to scrape jobs (no response). Open a LinkedIn Jobs page.' });
+          return;
+        }
+        resolve(resp);
+      });
+    });
+  });
+}
+
+async function sendCsvToBackend(csvData, importUrl = CRM_IMPORT_URL) {
   // Step 1: check auth
   let meRes;
   try {
@@ -210,7 +246,7 @@ async function sendCsvToBackend(csvData) {
 
       let res;
       try {
-        res = await fetchWithAuth(CRM_IMPORT_URL, {
+        res = await fetchWithAuth(importUrl, {
           method: 'POST',
           body: JSON.stringify({ csv: chunks[i] })
         });
@@ -271,6 +307,14 @@ async function sendCsvToBackend(csvData) {
           ? body.error
           : 'CSV rejected by the backend';
         setCrmStatus(`Import failed: ${msg}`);
+        return;
+      }
+
+      if (res.status === 500) {
+        const msg = body && typeof body === 'object' && body.error
+          ? body.error
+          : `Server error (${res.status}). Please try again.`;
+        setCrmStatus(msg);
         return;
       }
 
@@ -380,6 +424,34 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
   });
+
+  const sendJobsBtn = document.getElementById('send_jobs_to_crm');
+  if (sendJobsBtn) {
+    sendJobsBtn.addEventListener('click', async () => {
+      sendJobsBtn.disabled = true;
+      setCrmStatus('Scraping selected jobs...', { show: true });
+
+      const resp = await getJobsDataFromActiveTab();
+      if (!resp || !resp.ok) {
+        setCrmStatus(resp?.error || 'Failed to scrape jobs. Open a LinkedIn Jobs page and select jobs.');
+        sendJobsBtn.disabled = false;
+        return;
+      }
+
+      if (!resp.jobs || !resp.jobs.length) {
+        setCrmStatus(
+          'No jobs selected. On each job row, click Extract, or use LinkedIn checkboxes, then try again.',
+        );
+        sendJobsBtn.disabled = false;
+        return;
+      }
+
+      const csv = jobsToCsv(resp.jobs);
+      setCrmStatus(`Preparing CSV (${resp.jobs.length} jobs)...`, { show: true });
+      await sendCsvToBackend(csv, CRM_IMPORT_JOBS_URL);
+      sendJobsBtn.disabled = false;
+    });
+  }
 
   document.getElementById('clear_data').addEventListener('click', () => {
     chrome.runtime.sendMessage({ type: 'popup:clear_all' }, function() {

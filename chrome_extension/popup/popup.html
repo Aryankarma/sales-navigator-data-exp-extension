@@ -8,8 +8,6 @@
     <body>
         <div class='header'>Export Sales Navigator data</div>
         <div class='content'>
-            <div class="description">Select leads or companies on LinkedIn Sales Navigator and use the Export buttons.</div>
-
             <div id="auth_section" class="auth-section">
                 <div class="auth-status">
                     Auth status: <span id="auth_status">Checking...</span>
@@ -18,24 +16,28 @@
                 <div id="auth_error" class="auth-error"></div>
 
                 <div class="auth-actions">
-                    <button id="login_btn">Login with Google</button>
-                    <button id="logout_btn" class="logout-btn" style="display:none;">Logout</button>
+                    <button type="button" id="login_btn" class="btn btn-login">Login with Google</button>
+                    <button type="button" id="logout_btn" class="btn btn-logout" style="display:none;">Logout</button>
                 </div>
             </div>
 
             <div id="authed_content">
                 <div class="status">Saved profiles: <span id="user_count">0</span></div>
-                <div>
-                    <button id="download_csv">Download Leads CSV</button>
+
+                <div class="btn-group btn-group-leads" role="group" aria-label="Leads">
+                    <span class="btn-group-label">Leads</span>
+                    <button type="button" id="download_csv" class="btn btn-export">Download Leads CSV</button>
+                    <button type="button" id="send_to_crm" class="btn btn-crm">Send Leads to CRM</button>
                 </div>
-                <div>
-                    <button id="send_to_crm">Send to CRM</button>
+
+                <div class="btn-group btn-group-jobs" role="group" aria-label="Jobs">
+                    <span class="btn-group-label">Jobs</span>
+                    <button type="button" id="export_all_jobs" class="btn btn-export">Export Selected Jobs (current page)</button>
+                    <button type="button" id="send_jobs_to_crm" class="btn btn-crm">Send Jobs to CRM</button>
                 </div>
-                <div>
-                    <button id="export_all_jobs" class="job-btn">Export Selected Jobs (current page)</button>
-                </div>
-                <div>
-                    <button id="clear_data">Clear all saved data</button>
+
+                <div class="btn-group btn-group-danger" role="group" aria-label="Data">
+                    <button type="button" id="clear_data" class="btn btn-clear">Clear all saved data</button>
                 </div>
                 <div id="crm_status" class="crm-status" style="display:none;"></div>
             </div>

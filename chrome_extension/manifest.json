@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "Export Sales Navigator data as CSV",
   "version": "1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsEkuIEh0m0LyM9mQFmkUMI7yPfoGCh9ABTvdOqauLbv9u/q+vic3rgsu1cUutcPzs8NY4r0yjUNg5E7BzUlkX1kMvNPTEVD6K4KTtZCVRdkP3LgvhOy/5BdVy9DoznZkHofCoY+czyI+AKwf7++zvwEDF4gQ7Tx1SEsYFDT4uzjKbUN74PHCzKnxBdXFKhNJ09M+MfOU96ZyeDBpWmPWVAHXIxKyWNYbhv4dRWlkCfctL/wUdM4ME9TyIC9+j/fpV739xNy8XkoU8mHMMC34IqTTIRyC6hL5Bfc2e7aWfs638GGJC05w7oMXfJMDkmxgJ9crE+1NRFg6BoCccOvxcwIDAQAB",
   "description": "Export Sales Navigator data as CSV",
   "background": {
     "service_worker": "src/bg/background.js"

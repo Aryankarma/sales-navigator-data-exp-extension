@@ -1,14 +1,14 @@
 
 body {
     width: 300px;
-    min-height: 200px;
+    min-height: 0;
     margin: 0px;
     background: #F8F9FB;
     font-family: Arial, sans-serif;
 }
 
 .header {
-    height: 30px;
+    height: 28px;
     display: flex;
     justify-content: center;
     align-items: center;
@@ -20,7 +20,7 @@ body {
 .content {
     margin-left: 8px;
     margin-right: 8px;
-    margin-bottom: 15px;
+    margin-bottom: 16px;
     display: flex;
     justify-content: center;
     flex-direction: column;
@@ -28,15 +28,15 @@ body {
 }
 
 .description {
-    margin: 15px 10px;
+    margin: 8px 10px 6px;
     text-align: center;
-    font-size: 14px;
+    font-size: 13px;
     color: #555;
 }
 
 .status {
-    margin: 10px 0;
-    font-size: 16px;
+    margin: 4px 0 2px;
+    font-size: 15px;
     font-weight: bold;
     color: #333;
 }
@@ -70,35 +70,130 @@ input:focus::-webkit-input-placeholder, input:valid::-webkit-input-placeholder {
     visibility: visible !important;
 }
 
-button {
+/* ——— Buttons: shared chrome ——— */
+.btn {
     border: none;
-    background: #1abc9c;
     cursor: pointer;
-    border-radius: 3px;
-    padding: 10px;
+    border-radius: 5px;
+    padding: 7px 10px;
     width: 250px;
-    color: white;
-    margin: 5px 0;
-    box-shadow: 0 3px 6px 0 rgba(0, 0, 0, 0.2);
-    transition: all 0.3s;
+    color: #fff;
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.25;
+    box-shadow: 0 2px 4px rgba(15, 23, 42, 0.12);
+    transition: background 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease, opacity 0.2s ease;
 }
 
-button:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 6px 6px 0 rgba(0, 0, 0, 0.2);
-    background: #16a085;
+.btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(15, 23, 42, 0.16);
 }
 
-button:focus {outline:0;}
-#export_all_jobs {
-    background: #3498db;
+.btn:focus {
+    outline: 0;
 }
-#export_all_jobs:hover {
-    background: #2980b9;
+
+.btn:focus-visible {
+    outline: 2px solid #94a3b8;
+    outline-offset: 2px;
+}
+
+.btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+}
+
+/* Google sign-in */
+.btn-login {
+    background: #1a73e8;
+}
+
+.btn-login:hover:not(:disabled) {
+    background: #1557b0;
+}
+
+/* End session (mild destructive) */
+.btn-logout {
+    background: #c45c4a;
+}
+
+.btn-logout:hover:not(:disabled) {
+    background: #a84a3b;
+}
+
+/* Local file export — same for Leads CSV + Jobs export */
+.btn-export {
+    background: #475569;
+    color: #f8fafc;
+}
+
+.btn-export:hover:not(:disabled) {
+    background: #334155;
+}
+
+/* Push to Alpha Foundry CRM — same for Leads + Jobs */
+.btn-crm {
+    background: #0d9488;
+}
+
+.btn-crm:hover:not(:disabled) {
+    background: #0f766e;
+}
+
+/* Irreversible local wipe */
+.btn-clear {
+    background: #b45309;
+    color: #fffbeb;
+}
+
+.btn-clear:hover:not(:disabled) {
+    background: #92400e;
+}
+
+/* ——— Grouping: related actions sit together ——— */
+.btn-group {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    gap: 3px;
+    margin-top: 6px;
+}
+
+.btn-group-label {
+    align-self: flex-start;
+    width: 250px;
+    margin: 0 auto;
+    padding-left: 2px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #64748b;
+}
+
+.btn-group-leads {
+    padding-bottom: 0;
+}
+
+.btn-group-jobs {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid #e2e8f0;
+}
+
+.btn-group-danger {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid #e2e8f0;
 }
 
 .auth-section {
-    margin-top: 10px;
+    margin-top: 6px;
     width: 100%;
     display: flex;
     flex-direction: column;
@@ -106,23 +201,23 @@ button:focus {outline:0;}
 }
 
 .auth-status {
-    margin: 8px 0 4px;
-    font-size: 14px;
+    margin: 4px 0 2px;
+    font-size: 13px;
     font-weight: bold;
     color: #333;
     text-align: center;
 }
 
 .user-info {
-    margin: 4px 0 8px;
-    font-size: 13px;
+    margin: 2px 0 4px;
+    font-size: 12px;
     color: #555;
     text-align: center;
     min-height: 18px;
 }
 
 .auth-error {
-    margin: 8px 0 0;
+    margin: 4px 0 0;
     font-size: 12px;
     color: #c0392b;
     min-height: 16px;
@@ -133,20 +228,12 @@ button:focus {outline:0;}
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 10px;
-}
-
-.logout-btn {
-    background: #e74c3c;
-}
-
-.logout-btn:hover {
-    background: #c0392b;
+    gap: 6px;
 }
 
 .crm-status {
-    margin: 10px 0 0;
-    font-size: 13px;
+    margin: 6px 0 0;
+    font-size: 12px;
     color: #333;
     text-align: center;
     min-height: 18px;

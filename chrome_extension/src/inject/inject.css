@@ -120,6 +120,20 @@
   white-space: nowrap;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  line-height: 1.2;
+}
+
+/* Jobs: inline styles must not switch to inline-block (breaks vertical centering). */
+.extension-individual-button.jobs-extract-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  line-height: 1.2 !important;
+  box-sizing: border-box !important;
+  vertical-align: middle;
+  min-height: 26px;
 }
 
 .extension-export-li {
