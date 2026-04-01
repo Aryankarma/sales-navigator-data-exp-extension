@@ -6,6 +6,14 @@ s.onload = function() {
 };
 (document.head || document.documentElement).appendChild(s);
 
+// CRM `lead_source` CSV column — keep in sync with Alpha-Foundry `lib/crm/extension-lead-source.ts`
+var EXTENSION_LEAD_SOURCE = {
+  LINKEDIN_CONNECTION: 'linkedin_connection',
+  LINKEDIN_SENT_INVITATIONS: 'linkedin_sent_invitations',
+  LINKEDIN_SALES_LIST: 'linkedin_sales_list',
+  LINKEDIN_SALES_SEARCH: 'linkedin_sales_search'
+};
+
 // Handle callbacks from background script
 var callbacks = {};
 chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
@@ -33,6 +41,18 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
     } catch (e) {
       console.error('[Extension] Failed to scrape jobs for CRM:', e);
       sendResponse({ ok: false, error: (e && e.message) ? e.message : 'Failed to scrape jobs' });
+    }
+  }
+
+  // Scrape selected sent invitations for CRM send
+  if (request.type === 'popup:get_sent_invitations_data') {
+    try {
+      var leads = scrape_selected_sent_invitations();
+      console.log('[Extension] Sent invitations for CRM:', leads.length);
+      sendResponse({ ok: true, count: leads.length, leads: leads });
+    } catch (e) {
+      console.error('[Extension] Failed to scrape sent invitations:', e);
+      sendResponse({ ok: false, error: (e && e.message) ? e.message : 'Failed to scrape sent invitations' });
     }
   }
 
@@ -275,9 +295,134 @@ function inject_job_extract_buttons() {
 // ---------------------------------------------------------------------------
 // Select All / Deselect All master button (jobs + leads + company pages)
 // ---------------------------------------------------------------------------
+
+function show_connections_range_feedback(el, result) {
+  if (!el || !result) return;
+  if (el._extFeedbackTimer) {
+    clearTimeout(el._extFeedbackTimer);
+    el._extFeedbackTimer = null;
+  }
+  var msg = result.message || '';
+  if (!msg) {
+    el.style.display = 'none';
+    el.textContent = '';
+    return;
+  }
+  el.textContent = msg;
+  el.style.display = 'block';
+  el.style.color = result.ok ? '#86efac' : '#fbbf24';
+  el._extFeedbackTimer = setTimeout(function () {
+    el.style.display = 'none';
+    el.textContent = '';
+    el._extFeedbackTimer = null;
+  }, result.ok ? 4000 : 12000);
+}
+
 function ensure_select_all_button() {
   // Already in the live DOM? Nothing to do.
   if (document.getElementById('ext-select-all-btn')) return;
+
+  // Connections page: range controls (shown only on that page)
+  var rangeWrap = document.createElement('div');
+  rangeWrap.id = 'ext-range-controls';
+  rangeWrap.setAttribute('style', [
+    'position:fixed',
+    'bottom:20px',
+    'left:150px',
+    'z-index:2147483647',
+    'display:none',
+    'flex-wrap:wrap',
+    'align-items:center',
+    'gap:6px',
+    'padding:8px 10px',
+    'border-radius:10px',
+    'background:rgba(17, 24, 39, 0.92)',
+    'backdrop-filter:blur(6px)',
+    'box-shadow:0 2px 12px rgba(0,0,0,0.35)',
+    'font-family:-apple-system,BlinkMacSystemFont,sans-serif',
+    'color:#fff',
+    'max-width:min(calc(100vw - 32px), 420px)'
+  ].join(';'));
+
+  function makeRangeInput(id, placeholder) {
+    var el = document.createElement('input');
+    el.id = id;
+    el.type = 'number';
+    el.min = '1';
+    el.placeholder = placeholder;
+    el.value = placeholder === 'Start' ? '1' : '10';
+    el.setAttribute('style', [
+      'width:72px',
+      'padding:8px 10px',
+      'border-radius:8px',
+      'border:1px solid rgba(255,255,255,0.25)',
+      'background:rgba(255,255,255,0.08)',
+      'color:#fff',
+      'outline:none',
+      'font-size:12px'
+    ].join(';'));
+    return el;
+  }
+
+  var startInput = makeRangeInput('ext-range-start', 'Start');
+  var endInput = makeRangeInput('ext-range-end', 'End');
+
+  var maxLabel = document.createElement('div');
+  maxLabel.id = 'ext-range-max';
+  maxLabel.textContent = 'max: —';
+  maxLabel.setAttribute('style', 'font-size:12px;opacity:0.85;padding:0 6px;');
+
+  var applyBtn = document.createElement('button');
+  applyBtn.id = 'ext-range-apply';
+  applyBtn.textContent = 'Select range';
+  applyBtn.setAttribute('style', [
+    'padding:10px 14px',
+    'border-radius:8px',
+    'background:#10b981',
+    'color:#06131b',
+    'border:none',
+    'font-size:12px',
+    'font-weight:800',
+    'cursor:pointer'
+  ].join(';'));
+
+  var rangeFeedback = document.createElement('div');
+  rangeFeedback.id = 'ext-range-feedback';
+  rangeFeedback.setAttribute('style', [
+    'display:none',
+    'flex-basis:100%',
+    'width:100%',
+    'margin:0',
+    'padding:6px 4px 2px',
+    'font-size:11px',
+    'line-height:1.4',
+    'font-weight:600'
+  ].join(';'));
+
+  applyBtn.addEventListener('click', async function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!is_connections_page()) return;
+    applyBtn.disabled = true;
+    try {
+      var result = await select_connections_range(parseInt(startInput.value, 10), parseInt(endInput.value, 10));
+      show_connections_range_feedback(rangeFeedback, result);
+    } catch (ex) {
+      console.warn('[Extension] range select failed', ex);
+      show_connections_range_feedback(rangeFeedback, {
+        ok: false,
+        message: 'Something went wrong. Try again.'
+      });
+    } finally {
+      applyBtn.disabled = false;
+    }
+  });
+
+  rangeWrap.appendChild(startInput);
+  rangeWrap.appendChild(endInput);
+  rangeWrap.appendChild(maxLabel);
+  rangeWrap.appendChild(applyBtn);
+  rangeWrap.appendChild(rangeFeedback);
 
   var btn = document.createElement('button');
   btn.id = 'ext-select-all-btn';
@@ -312,7 +457,14 @@ function ensure_select_all_button() {
     e.stopPropagation();
 
     var isJobs = window.location.href.includes('/jobs/');
-    var selector = isJobs ? '.jobs-extract-btn' : '.extension-individual-button';
+    var isSentInvitations = is_sent_invitations_page();
+    var isSalesList = is_sales_people_list_page();
+    var isConnections = is_connections_page();
+    var selector = isJobs ? '.jobs-extract-btn'
+      : isSentInvitations ? '.sent-invitation-extract-btn'
+      : isSalesList ? '.sales-list-extract-btn'
+      : isConnections ? '.connections-extract-btn'
+      : '.extension-individual-button';
 
     var allBtns = document.querySelectorAll(selector);
     if (allBtns.length === 0) return;
@@ -344,6 +496,7 @@ function ensure_select_all_button() {
   });
 
   document.body.appendChild(btn);
+  document.body.appendChild(rangeWrap);
 }
 
 /** True if the user marked this row via our Extract button or LinkedIn's list checkbox. */
@@ -615,6 +768,722 @@ function scrape_all_jobs() {
   return jobs;
 }
 
+// ---------------------------------------------------------------------------
+// Sent Invitations page (/mynetwork/invitation-manager/sent)
+// ---------------------------------------------------------------------------
+
+function is_sent_invitations_page() {
+  return window.location.href.includes('/mynetwork/invitation-manager/sent');
+}
+
+// ---------------------------------------------------------------------------
+// My Network Connections page (/mynetwork/invite-connect/connections/)
+// ---------------------------------------------------------------------------
+
+function is_connections_page() {
+  return window.location.href.includes('/mynetwork/invite-connect/connections');
+}
+
+function get_connections_list_root() {
+  // Prefer the actual lazy list column (there are often two nodes with ConnectionsPage_ConnectionsList).
+  var $lazy = $('[data-component-type="LazyColumn"][data-testid="lazy-column"]').first();
+  if ($lazy.length) return $lazy;
+  var $root = $('[componentkey="ConnectionsPage_ConnectionsList"]').first();
+  if ($root.length) return $root;
+  $root = $('main').first();
+  if ($root.length) return $root;
+  return $('body').first();
+}
+
+function normalize_linkedin_profile_url(href) {
+  if (!href) return '';
+  var u = href;
+  if (u.startsWith('/')) u = 'https://www.linkedin.com' + u;
+  u = u.split('?')[0].split('#')[0];
+  if (u.endsWith('/')) u = u.slice(0, -1);
+  return u;
+}
+
+function extract_profile_id_from_profile_url(profileUrl) {
+  if (!profileUrl) return '';
+  var m = profileUrl.match(/linkedin\.com\/in\/([^\/\?\#]+)/i);
+  return m && m[1] ? m[1] : '';
+}
+
+function connection_row_looks_valid($el) {
+  if (!$el.length) return false;
+  if ($el.find('a[href*="/in/"]').length === 0) return false;
+  return (
+    $el.find('a[aria-label="Message"], a[href*="/messaging/compose/"]').length > 0 ||
+    $el.find('button[aria-label="Show more actions"]').length > 0
+  );
+}
+
+function filter_out_auto_component_ancestors(candidates) {
+  var els = candidates.get();
+  // Drop any candidate that still contains another candidate (parent wrapper around multiple rows).
+  return $(els.filter(function (el) {
+    return !els.some(function (other) {
+      return other !== el && $.contains(el, other);
+    });
+  }));
+}
+
+function get_connection_rows($root) {
+  var $scope = ($root && $root.length) ? $root : $(document.body);
+
+  // Exact structure from LinkedIn connections list (see DOM): one row is
+  // div[data-display-contents="true"] > div[componentkey^="auto-component-"] — never use a parent
+  // that contains multiple rows or only the first card gets an Export button.
+  var $exact = $scope.find('div[data-display-contents="true"] > div[componentkey^="auto-component-"]').filter(function () {
+    return connection_row_looks_valid($(this));
+  });
+  if ($exact.length) return $exact;
+
+  var $auto = $scope.find('div[componentkey^="auto-component-"]').filter(function () {
+    return connection_row_looks_valid($(this));
+  });
+  $auto = filter_out_auto_component_ancestors($auto);
+  if ($auto.length) return $auto;
+
+  // Fallback: direct child of data-display-contents that looks like a row.
+  var $fallback = $scope.find('div[data-display-contents="true"] > div').filter(function () {
+    return connection_row_looks_valid($(this));
+  });
+  if ($fallback.length) return $fallback;
+
+  // Last resort: map each profile link to its nearest "row-ish" ancestor, but ensure we pick
+  // the *closest* ancestor with actions (not the first one, which may be shared).
+  var mapped = $scope.find('a[href*="/in/"]').map(function () {
+    var $a = $(this);
+    var $withActions = $a.closest('div').parents().filter(function () {
+      var $p = $(this);
+      return (
+        $p.find('a[aria-label="Message"], a[href*="/messaging/compose/"]').length > 0 ||
+        $p.find('button[aria-label*="Show more actions"], button[aria-label*="actions"]').length > 0
+      );
+    }).first();
+    if ($withActions.length) return $withActions.get(0);
+    return $a.closest('div').get(0);
+  });
+
+  var seen = Object.create(null);
+  var uniq = [];
+  $(mapped).each(function () {
+    var el = this;
+    if (!el) return;
+    if (seen[el]) return;
+    seen[el] = true;
+    uniq.push(el);
+  });
+  return $(uniq);
+}
+
+function scrape_connection_from_row($row) {
+  var profileUrl = '';
+  var $profileA = $row.find('a[href*="/in/"]').first();
+  if ($profileA.length) profileUrl = normalize_linkedin_profile_url($profileA.attr('href') || '');
+
+  var name = '';
+  var headline = '';
+  var $nameA = $row.find('a[href*="/in/"]').filter(function () {
+    return $(this).find('p').length > 0;
+  }).first();
+  if (!$nameA.length) $nameA = $profileA;
+
+  if ($nameA.length) {
+    var $ps = $nameA.find('p');
+    if ($ps.length) {
+      name = $($ps.get(0)).text().replace(/\s+/g, ' ').trim();
+      if ($ps.length > 1) headline = $($ps.get(1)).text().replace(/\s+/g, ' ').trim();
+    }
+  }
+
+  if (!name) {
+    $row.find('p').each(function () {
+      var t = $(this).text().replace(/\s+/g, ' ').trim();
+      if (!t) return;
+      if (/^connected on\b/i.test(t)) return;
+      name = t;
+      return false;
+    });
+  }
+
+  var connectedOn = '';
+  $row.find('p').each(function () {
+    var t = $(this).text().replace(/\s+/g, ' ').trim();
+    if (!t) return;
+    if (/^connected on\b/i.test(t)) {
+      connectedOn = t;
+      return false;
+    }
+  });
+
+  var profileId = extract_profile_id_from_profile_url(profileUrl) || name || '';
+
+  // Connections list: the second line is LinkedIn headline / blurb (bio), not a structured job title.
+  // Put it only in `about` for CRM/CSV; leave `title` empty so it is not duplicated.
+  return {
+    name: name || '',
+    title: '',
+    company: '',
+    company_id: '',
+    location: '',
+    about: headline || '',
+    tenure: connectedOn || '',
+    profile_id: profileId,
+    profile_url: profileUrl || '',
+    lead_source: EXTENSION_LEAD_SOURCE.LINKEDIN_CONNECTION
+  };
+}
+
+function make_connections_export_btn($row) {
+  var $btn = $('<button/>')
+    .addClass('extension-individual-button connections-extract-btn available')
+    .text('Export')
+    .css({
+      margin: '0 0 0 8px',
+      'font-size': '12px',
+      padding: '4px 10px',
+      'border-radius': '4px',
+      background: '#fff',
+      border: '1px solid #0073b1',
+      color: '#0073b1',
+      cursor: 'pointer',
+      'font-weight': '600',
+      'z-index': '9999',
+      position: 'relative',
+      'line-height': '1.2',
+      'box-sizing': 'border-box',
+      'min-height': '26px',
+      display: 'inline-flex',
+      'align-items': 'center',
+      'vertical-align': 'middle',
+      'flex-shrink': '0'
+    });
+
+  $btn.on('mousedown', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  $btn.on('click', function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    var $b = $(e.currentTarget);
+    var fresh = scrape_connection_from_row($row);
+
+    if ($b.hasClass('added')) {
+      $b.removeClass('added').addClass('available').text('Export')
+        .css({ background: '#fff', color: '#0073b1', border: '1px solid #0073b1' });
+      var cb = (new Date()).getTime();
+      try {
+        if (chrome.runtime && chrome.runtime.id) {
+          chrome.runtime.sendMessage({
+            type: 'extension:leads:remove',
+            data: { profile_id: fresh.profile_id },
+            callback_id: cb
+          });
+        }
+      } catch (ex) {}
+      callbacks[cb] = function () { refresh_count(); };
+    } else {
+      $b.removeClass('available').addClass('added').text('Selected')
+        .css({ background: '#0073b1', color: '#fff', border: '1px solid #0073b1' });
+      var cb2 = (new Date()).getTime();
+      try {
+        if (chrome.runtime && chrome.runtime.id) {
+          chrome.runtime.sendMessage({
+            type: 'extension:lead:add',
+            data: fresh,
+            callback_id: cb2
+          });
+        }
+      } catch (ex2) {}
+      callbacks[cb2] = function () { refresh_count(); };
+    }
+  });
+
+  return $btn;
+}
+
+function inject_connections_export_buttons() {
+  if (!is_connections_page()) return;
+
+  var $root = get_connections_list_root();
+  var $rows = get_connection_rows($root);
+  if (!$rows.length) return;
+
+  $rows.each(function () {
+    var $row = $(this);
+    // Do not use jQuery .data() as a guard — virtualized lists recycle nodes. Prefer real DOM check.
+    if ($row.find('.connections-extract-btn').length) return;
+
+    var data = scrape_connection_from_row($row);
+    if (!data || (!data.name && !data.profile_url)) return;
+
+    var $msg = $row.find('a[aria-label="Message"], a[href*="/messaging/compose/"]').first();
+    var $actions = $msg.length ? $msg.parent() : $row.find('button[aria-label="Show more actions"]').first().parent();
+    if (!$actions.length) $actions = $row;
+
+    $actions.css({ display: 'inline-flex', 'align-items': 'center', gap: '6px', 'flex-wrap': 'wrap' });
+    $actions.append(make_connections_export_btn($row));
+  });
+}
+
+function get_connections_total_count_hint() {
+  var total = 0;
+  $('h1,h2,h3,span,p').each(function () {
+    var t = ($(this).text() || '').replace(/\s+/g, ' ').trim();
+    if (!t) return;
+    var m = t.match(/(\d[\d,]*)\s+connections\b/i);
+    if (m && m[1]) {
+      total = parseInt(m[1].replace(/,/g, ''), 10) || 0;
+      return false;
+    }
+  });
+  return total;
+}
+
+function connections_range_scroll_first_message(s, e, loaded) {
+  if (!loaded) {
+    return 'Scroll first to load enough items in the list, then try again.';
+  }
+  return (
+    'Scroll first to load enough items so rows ' +
+    s +
+    '–' +
+    e +
+    ' are all visible (' +
+    loaded +
+    ' loaded), then try again.'
+  );
+}
+
+async function select_connections_range(startIndex, endIndex) {
+  var s = parseInt(startIndex, 10);
+  var e = parseInt(endIndex, 10);
+  if (!isFinite(s) || !isFinite(e)) {
+    return { ok: false, message: 'Enter valid start and end numbers.' };
+  }
+  if (s < 1) s = 1;
+  if (e < s) e = s;
+
+  inject_connections_export_buttons();
+  var $root = get_connections_list_root();
+  var $rows = get_connection_rows($root);
+  var loaded = $rows.length;
+
+  if (loaded < e) {
+    return { ok: false, message: connections_range_scroll_first_message(s, e, loaded) };
+  }
+
+  for (var j = s; j <= e; j++) {
+    var $checkRow = $($rows.get(j - 1));
+    if (!$checkRow.length) {
+      return { ok: false, message: connections_range_scroll_first_message(s, e, loaded) };
+    }
+    if (!$checkRow.find('.connections-extract-btn').length) {
+      inject_connections_export_buttons();
+    }
+    if (!$checkRow.find('.connections-extract-btn').length) {
+      return { ok: false, message: connections_range_scroll_first_message(s, e, loaded) };
+    }
+  }
+
+  for (var i = s; i <= e; i++) {
+    var $row = $($rows.get(i - 1));
+    var $btn = $row.find('.connections-extract-btn').first();
+    if ($btn.length && !$btn.hasClass('added')) {
+      try { $btn.get(0).click(); } catch (ex) {}
+    }
+  }
+
+  return { ok: true, message: 'Selected rows ' + s + '–' + e + '.' };
+}
+
+/**
+ * Scrape a single invitation row from the sent invitations page.
+ * DOM structure (from provided HTML):
+ *   div[role="listitem"]
+ *     div > a[href="/in/..."]  (avatar link)
+ *     div > div > p > a[href="/in/..."]  (name link)
+ *          > p._12486a17  (headline/bio)
+ *          > p._9954391d  (sent date)
+ *     div > a (Withdraw button)
+ */
+function scrape_sent_invitation_from_row($item) {
+  // Profile URL — prefer the name link anchor
+  var profileUrl = '';
+  $item.find('a[href*="/in/"]').each(function() {
+    var href = $(this).attr('href') || '';
+    if (href.includes('/in/') && !profileUrl) {
+      profileUrl = href.startsWith('http') ? href : 'https://www.linkedin.com' + href;
+      profileUrl = profileUrl.split('?')[0];
+    }
+  });
+
+  // Name — the anchor with class a957c9b0 (name link inside paragraph)
+  var name = $item.find('a.a957c9b0').first().text().trim();
+  if (!name) {
+    // Fallback: any anchor inside the name paragraph
+    name = $item.find('p a[href*="/in/"]').first().text().trim();
+  }
+
+  // Headline/bio — paragraph with class _12486a17 (first info line)
+  var headline = $item.find('p._12486a17').first().text().trim();
+
+  // Sent date — paragraph with class _9954391d
+  var sentDate = $item.find('p._9954391d').first().text().trim();
+
+  // Profile ID extracted from URL for use as a unique key
+  var profileId = '';
+  if (profileUrl) {
+    var parts = profileUrl.split('/in/');
+    if (parts[1]) profileId = parts[1].replace(/\/$/, '');
+  }
+
+  return {
+    name: name,
+    headline: headline,
+    sentDate: sentDate,
+    profileUrl: profileUrl,
+    profileId: profileId
+  };
+}
+
+/**
+ * Collect all selected sent invitation rows.
+ * Returns array of lead objects compatible with the CRM leads CSV format.
+ */
+function scrape_selected_sent_invitations() {
+  var leads = [];
+  $('.sent-invitation-extract-btn.added').each(function() {
+    var $btn = $(this);
+    var $item = $btn.closest('div[role="listitem"]');
+    if (!$item.length) return;
+    var data = scrape_sent_invitation_from_row($item);
+    if (data.name || data.profileUrl) {
+      leads.push({
+        name: data.name || '',
+        title: data.headline || '',    // headline maps to title/job_title
+        company: '',
+        company_id: '',
+        location: '',
+        about: data.headline || '',    // also store in about for context
+        tenure: data.sentDate || '',
+        profile_url: data.profileUrl || '',
+        lead_source: EXTENSION_LEAD_SOURCE.LINKEDIN_SENT_INVITATIONS
+      });
+    }
+  });
+  return leads;
+}
+
+/**
+ * Inject Extract buttons next to every Withdraw button on the sent invitations page.
+ */
+function inject_sent_invitation_extract_buttons() {
+  if (!is_sent_invitations_page()) return;
+
+  $('div[role="listitem"]').each(function() {
+    var $item = $(this);
+
+    // Find the withdraw button container — last child div with the withdraw anchor
+    var $withdrawContainer = $item.find('a').filter(function() {
+      return $(this).text().trim() === 'Withdraw';
+    }).first().parent();
+
+    if (!$withdrawContainer.length) return;
+
+    // Guard: don't inject twice
+    if ($withdrawContainer.data('ext-sent-injected')) return;
+    $withdrawContainer.data('ext-sent-injected', true);
+
+    var data = scrape_sent_invitation_from_row($item);
+    if (!data.name && !data.profileUrl) return;
+
+    var $btn = $('<button/>')
+      .addClass('extension-individual-button sent-invitation-extract-btn available')
+      .text('Extract')
+      .css({
+        'margin': '0 0 0 8px',
+        'font-size': '12px',
+        'padding': '4px 10px',
+        'border-radius': '4px',
+        'background': '#fff',
+        'border': '1px solid #0073b1',
+        'color': '#0073b1',
+        'cursor': 'pointer',
+        'font-weight': '600',
+        'z-index': '9999',
+        'position': 'relative',
+        'line-height': '1.2',
+        'box-sizing': 'border-box',
+        'min-height': '26px',
+        'display': 'inline-flex',
+        'align-items': 'center',
+        'vertical-align': 'middle',
+        'flex-shrink': '0'
+      });
+
+    $btn.on('mousedown', function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+    });
+
+    $btn.on('click', function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var $b = $(e.currentTarget);
+      var fresh = scrape_sent_invitation_from_row($item);
+
+      if ($b.hasClass('added')) {
+        $b.removeClass('added').addClass('available').text('Extract').css({ background: '#fff', color: '#0073b1', border: '1px solid #0073b1' });
+        // Remove from store
+        if (fresh.profileId) {
+          var cb = (new Date()).getTime();
+          try {
+            if (chrome.runtime && chrome.runtime.id) {
+              chrome.runtime.sendMessage({ type: 'extension:leads:remove', data: { profile_id: fresh.profileId }, callback_id: cb });
+            }
+          } catch(ex) {}
+          callbacks[cb] = function() { refresh_count(); };
+        }
+      } else {
+        $b.removeClass('available').addClass('added').text('Selected').css({ background: '#0073b1', color: '#fff', border: '1px solid #0073b1' });
+        // Add to store using the leads store so popup "Send Leads to CRM" works
+        if (fresh.profileId || fresh.name) {
+          var leadPayload = {
+            profile_id: fresh.profileId || fresh.name,
+            name: fresh.name || '',
+            title: fresh.headline || '',
+            company: '',
+            company_id: '',
+            location: '',
+            about: fresh.headline || '',
+            tenure: fresh.sentDate || '',
+            profile_url: fresh.profileUrl || '',
+            lead_source: EXTENSION_LEAD_SOURCE.LINKEDIN_SENT_INVITATIONS
+          };
+          var cb = (new Date()).getTime();
+          try {
+            if (chrome.runtime && chrome.runtime.id) {
+              chrome.runtime.sendMessage({ type: 'extension:lead:add', data: leadPayload, callback_id: cb });
+            }
+          } catch(ex) {}
+          callbacks[cb] = function() { refresh_count(); };
+        }
+      }
+    });
+
+    // Make the withdraw container flex so our button sits inline
+    $withdrawContainer.css({
+      display: 'inline-flex',
+      'align-items': 'center',
+      gap: '6px',
+      'flex-wrap': 'nowrap'
+    });
+
+    $withdrawContainer.append($btn);
+    console.log('[Extension] Extract button injected for:', data.name || data.profileUrl);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Sales Navigator People List page (/sales/lists/people/*)
+// ---------------------------------------------------------------------------
+
+function is_sales_people_list_page() {
+  return window.location.href.includes('/sales/lists/people');
+}
+
+/**
+ * Scrape a single row from the Sales Navigator people list table.
+ * DOM: tr[data-x--people-list--row]
+ *   td.list-people-detail-header__entity  → name, profile link, job title
+ *   td.list-people-detail-header__account → company name + company link
+ *   td[data-anonymize="location"]         → location text
+ *   td.list-people-detail-header__date-added → date added
+ */
+function scrape_sales_list_row($row) {
+  // Profile URL and ID — anchor with data-x--people-list--person-name or lists-detail__view-profile-name-link
+  var profileHref = $row.find('a[data-x--people-list--person-name]').first().attr('href') ||
+                    $row.find('a.lists-detail__view-profile-name-link').first().attr('href') ||
+                    $row.find('a[href*="/sales/lead/"]').first().attr('href') || '';
+  var profileUrl = profileHref ? 'https://www.linkedin.com' + profileHref.split('?')[0] : '';
+  var profileId = profileHref ? profileHref.split('/sales/lead/')[1] : '';
+  if (profileId) profileId = profileId.split('?')[0];
+
+  // Name
+  var name = $row.find('[data-x--people-list--person-name] span._lead-detail-entity-details_ocf42k').first().text().trim() ||
+             $row.find('[data-anonymize="person-name"]').first().text().trim() ||
+             $row.find('a.lists-detail__view-profile-name-link').first().text().trim();
+
+  // Job title
+  var title = $row.find('[data-anonymize="job-title"]').first().text().replace(/\s+/g, ' ').trim();
+
+  // Company name and ID
+  var $companyLink = $row.find('a[href*="/sales/company/"]').first();
+  var company = $row.find('span[data-anonymize="company-name"]').first().text().trim();
+  var companyHref = $companyLink.attr('href') || '';
+  var company_id = '';
+  var match = companyHref.match(/\/sales\/company\/(\d+)/);
+  if (match) company_id = match[1];
+
+  // Location
+  var location = $row.find('td[data-anonymize="location"]').first().text().replace(/\s+/g, ' ').trim();
+
+  // Date added (tenure repurposed)
+  var dateAdded = $row.find('td.list-people-detail-header__date-added').first().text().replace(/\s+/g, ' ').trim();
+
+  return {
+    name: name,
+    title: title,
+    company: company,
+    company_id: company_id,
+    location: location,
+    about: '',
+    tenure: dateAdded,
+    profile_id: profileId,
+    profile_url: profileUrl
+  };
+}
+
+var salesListDomObserver = null;
+
+function disconnect_sales_list_dom_observer() {
+  if (salesListDomObserver) {
+    salesListDomObserver.disconnect();
+    salesListDomObserver = null;
+  }
+}
+
+function ensure_sales_list_dom_observer() {
+  if (!is_sales_people_list_page()) {
+    disconnect_sales_list_dom_observer();
+    return;
+  }
+  if (salesListDomObserver) return;
+  var target = document.querySelector('tbody') || document.body;
+  try {
+    salesListDomObserver = new MutationObserver(function() {
+      inject_sales_list_extract_buttons();
+    });
+    salesListDomObserver.observe(target, { childList: true, subtree: true });
+  } catch(e) {
+    console.warn('[Extension] sales list observer failed', e);
+  }
+}
+
+/**
+ * Inject Extract buttons into the last actions cell of each people list row.
+ * The actions cell has class list-people-detail-header__actions.
+ */
+function inject_sales_list_extract_buttons() {
+  if (!is_sales_people_list_page()) return;
+
+  $('tr[data-x--people-list--row]').each(function() {
+    var $row = $(this);
+
+    // Guard: inject only once per row
+    if ($row.data('ext-sales-list-injected')) return;
+
+    var data = scrape_sales_list_row($row);
+    if (!data.name && !data.profile_id) return;
+
+    $row.data('ext-sales-list-injected', true);
+
+    var $btn = $('<button/>')
+      .addClass('extension-individual-button sales-list-extract-btn available')
+      .text('Extract')
+      .css({
+        'margin': '0',
+        'font-size': '11px',
+        'padding': '3px 8px',
+        'border-radius': '4px',
+        'background': '#fff',
+        'border': '1px solid #0073b1',
+        'color': '#0073b1',
+        'cursor': 'pointer',
+        'font-weight': '600',
+        'z-index': '9999',
+        'position': 'relative',
+        'line-height': '1.3',
+        'box-sizing': 'border-box',
+        'white-space': 'nowrap',
+        'display': 'inline-flex',
+        'align-items': 'center'
+      });
+
+    $btn.on('mousedown', function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+    });
+
+    $btn.on('click', function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var $b = $(e.currentTarget);
+      var fresh = scrape_sales_list_row($row);
+
+      if ($b.hasClass('added')) {
+        $b.removeClass('added').addClass('available').text('Extract')
+          .css({ background: '#fff', color: '#0073b1', border: '1px solid #0073b1' });
+        var cb = (new Date()).getTime();
+        try {
+          if (chrome.runtime && chrome.runtime.id) {
+            chrome.runtime.sendMessage({
+              type: 'extension:leads:remove',
+              data: { profile_id: fresh.profile_id || fresh.name },
+              callback_id: cb
+            });
+          }
+        } catch(ex) {}
+        callbacks[cb] = function() { refresh_count(); };
+      } else {
+        $b.removeClass('available').addClass('added').text('Selected')
+          .css({ background: '#0073b1', color: '#fff', border: '1px solid #0073b1' });
+        var leadPayload = {
+          profile_id: fresh.profile_id || fresh.name,
+          name: fresh.name || '',
+          title: fresh.title || '',
+          company: fresh.company || '',
+          company_id: fresh.company_id || '',
+          location: fresh.location || '',
+          about: fresh.about || '',
+          tenure: fresh.tenure || '',
+          profile_url: fresh.profile_url || '',
+          lead_source: EXTENSION_LEAD_SOURCE.LINKEDIN_SALES_LIST
+        };
+        var cb = (new Date()).getTime();
+        try {
+          if (chrome.runtime && chrome.runtime.id) {
+            chrome.runtime.sendMessage({
+              type: 'extension:lead:add',
+              data: leadPayload,
+              callback_id: cb
+            });
+          }
+        } catch(ex) {}
+        callbacks[cb] = function() { refresh_count(); };
+      }
+    });
+
+    // Append to the actions cell
+    var $actionsCell = $row.find('td.list-people-detail-header__actions');
+    if ($actionsCell.length) {
+      $actionsCell.css({ 'white-space': 'nowrap', 'vertical-align': 'middle' });
+      $actionsCell.append($btn);
+    } else {
+      // Fallback: append to last td
+      $row.find('td').last().append($btn);
+    }
+
+    console.log('[Extension] Sales list Extract button injected for:', data.name || data.profile_id);
+  });
+}
+
 // Create observer object used to check company is fetched
 var observer = new MutationObserver(function(mutations) {
   mutations.forEach(function(mutation) {
@@ -679,7 +1548,17 @@ function scrape_lead_from_row($item) {
 
   console.log('[Extension] Scraped lead:', { name, profile_id, title, company, location });
 
-  return { name, profile_id, title, company, company_id, location, about, tenure };
+  return {
+    name,
+    profile_id,
+    title,
+    company,
+    company_id,
+    location,
+    about,
+    tenure,
+    lead_source: EXTENSION_LEAD_SOURCE.LINKEDIN_SALES_SEARCH
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -783,6 +1662,14 @@ function reset_user() {
 // ---------------------------------------------------------------------------
 function refresh_count() {
   var isCompany = window.location.href.includes('/search/company');
+
+  // For sent invitations, count directly from DOM (no background store needed for display)
+  if (is_sent_invitations_page()) {
+    var selectedCount = document.querySelectorAll('.sent-invitation-extract-btn.added').length;
+    $('.extension-button').html('<b>Send ' + selectedCount + ' leads to CRM</b>');
+    return;
+  }
+
   var cb = (new Date()).getTime();
   callbacks[cb] = function(rsp) {
     var count = rsp.response.value;
@@ -807,7 +1694,9 @@ async function start_check() {
   var paths = [
     "https://www.linkedin.com/sales/search/people",
     "https://www.linkedin.com/sales/lists/people",
-    "https://www.linkedin.com/sales/search/company"
+    "https://www.linkedin.com/sales/search/company",
+    "https://www.linkedin.com/mynetwork/invitation-manager/sent",
+    "https://www.linkedin.com/mynetwork/invite-connect/connections"
   ];
 
   var url_supported = paths.some(p => window.location.href.indexOf(p) === 0);
@@ -818,8 +1707,9 @@ async function start_check() {
   }
 
   if (!$('.extension-button').length) {
+    var initialLabel = is_sent_invitations_page() ? 'Send 0 leads to CRM' : 'Export 0 items';
     var $button = $('<div/>').addClass('extension-button-wrapper').html(
-      '<div class="extension-button"><b>Export 0 items</b></div><div class="extension-button-delete">x</div>'
+      '<div class="extension-button"><b>' + initialLabel + '</b></div><div class="extension-button-delete">x</div>'
     );
 
     // Clear button — tells background to wipe in-memory stores
@@ -849,6 +1739,67 @@ async function start_check() {
       if (currentCount === 0) {
         $button_elem.addClass('error').text('No leads to export');
         setTimeout(() => refresh_count(), 2000);
+        return;
+      }
+
+      // Sent invitations page: send directly to CRM via auth:fetch
+      if (is_sent_invitations_page()) {
+        $button_elem.addClass('loading').text('Sending to CRM...');
+        try {
+          var leads = scrape_selected_sent_invitations();
+          if (!leads.length) {
+            $button_elem.removeClass('loading').addClass('error').text('No leads selected');
+            setTimeout(() => { $button_elem.removeClass('error'); refresh_count(); }, 2500);
+            return;
+          }
+          // Build CSV matching the CRM leads import format
+          var header = ['name', 'title', 'company', 'company_id', 'location', 'about', 'tenure', 'profile_url', 'lead_source'];
+          var csvRows = [header.join(',')];
+          leads.forEach(function(l) {
+            var row = header.map(function(k) {
+              var v = l[k] || '';
+              return '"' + String(v).replace(/"/g, '""').replace(/\r?\n|\r/g, ' ') + '"';
+            });
+            csvRows.push(row.join(','));
+          });
+          var csv = csvRows.join('\r\n');
+
+          var cb2 = (new Date()).getTime();
+          callbacks[cb2] = function(rsp) {
+            $button_elem.removeClass('loading');
+            if (rsp && rsp.ok) {
+              $button_elem.addClass('valid').text('Sent to CRM!');
+              // Deselect all buttons
+              document.querySelectorAll('.sent-invitation-extract-btn.added').forEach(function(b) { b.click(); });
+              setTimeout(function() {
+                $button_elem.removeClass('valid');
+                refresh_count();
+              }, 3000);
+            } else {
+              var errMsg = (rsp && rsp.error) ? rsp.error : 'CRM send failed';
+              $button_elem.addClass('error').text('Error: ' + errMsg.slice(0, 40));
+              setTimeout(() => { $button_elem.removeClass('error'); refresh_count(); }, 3000);
+            }
+          };
+          try {
+            if (chrome.runtime && chrome.runtime.id) {
+              chrome.runtime.sendMessage({
+                type: 'auth:fetch',
+                data: { path: '/api/crm/import', method: 'POST', body: { csv: csv } },
+                callback_id: cb2
+              }, function(rsp) {
+                // Background returns directly for auth:fetch
+                if (callbacks[cb2]) { callbacks[cb2](rsp); delete callbacks[cb2]; }
+              });
+            }
+          } catch(ex) {
+            $button_elem.removeClass('loading').addClass('error').text('Extension error');
+            setTimeout(() => { $button_elem.removeClass('error'); refresh_count(); }, 2500);
+          }
+        } catch(err) {
+          $button_elem.removeClass('loading').addClass('error').text('Scrape error');
+          setTimeout(() => { $button_elem.removeClass('error'); refresh_count(); }, 2500);
+        }
         return;
       }
 
@@ -905,6 +1856,39 @@ start_check();
 // Per-row Export button injection (runs every second)
 // ---------------------------------------------------------------------------
 function individual_finder_tick() {
+  if (is_sent_invitations_page()) {
+    inject_sent_invitation_extract_buttons();
+    ensure_select_all_button();
+    refresh_count();
+    return;
+  }
+
+  if (is_connections_page()) {
+    inject_connections_export_buttons();
+    ensure_select_all_button();
+
+    var range = document.getElementById('ext-range-controls');
+    if (range) range.style.display = 'inline-flex';
+
+    var max = get_connections_total_count_hint() || get_connection_rows(get_connections_list_root()).length || 0;
+    var maxEl = document.getElementById('ext-range-max');
+    if (maxEl) maxEl.textContent = max ? ('max: ' + max) : 'max: —';
+
+    var sIn = document.getElementById('ext-range-start');
+    var eIn = document.getElementById('ext-range-end');
+    if (sIn && max) sIn.max = String(max);
+    if (eIn && max) eIn.max = String(max);
+
+    return;
+  }
+
+  if (is_sales_people_list_page()) {
+    inject_sales_list_extract_buttons();
+    ensure_select_all_button();
+    ensure_sales_list_dom_observer();
+    return;
+  }
+
   if (window.location.href.includes('/search/company')) {
     // Company search page
     $('.artdeco-list__item').each(function() {
@@ -1033,9 +2017,12 @@ setInterval(function() {
   if (last_url != window.location.href) {
     if (extension_button_int) clearInterval(extension_button_int);
     disconnect_jobs_dom_observer();
+    disconnect_sales_list_dom_observer();
     // Remove select-all button on every navigation so it re-creates fresh
     var stale = document.getElementById('ext-select-all-btn');
     if (stale) stale.parentNode.removeChild(stale);
+    var staleRange = document.getElementById('ext-range-controls');
+    if (staleRange) staleRange.parentNode.removeChild(staleRange);
     setTimeout(function () {
       start_check();
     }, 300);
@@ -1049,7 +2036,14 @@ function sync_select_all_button_label() {
   var masterBtn = document.getElementById('ext-select-all-btn');
   if (!masterBtn) return;
   var isJobs = window.location.href.includes('/jobs/');
-  var selector = isJobs ? '.jobs-extract-btn' : '.extension-individual-button';
+  var isSentInvitations = is_sent_invitations_page();
+  var isSalesList = is_sales_people_list_page();
+  var isConnections = is_connections_page();
+  var selector = isJobs ? '.jobs-extract-btn'
+    : isSentInvitations ? '.sent-invitation-extract-btn'
+    : isSalesList ? '.sales-list-extract-btn'
+    : isConnections ? '.connections-extract-btn'
+    : '.extension-individual-button';
   var allBtns = document.querySelectorAll(selector);
   if (allBtns.length === 0) return;
   var addedCount = document.querySelectorAll(selector + '.added').length;

@@ -397,14 +397,16 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
         return;
       }
 
-      const header = ['name', 'title', 'company', 'company_id', 'location', 'about', 'tenure', 'profile_url'];
+      const header = ['name', 'title', 'company', 'company_id', 'location', 'about', 'tenure', 'profile_url', 'lead_source'];
       const csvRows = [header.join(',')];
 
       for (const u of all_users) {
         const row = header.map((key) => {
           let value;
           if (key === 'profile_url') {
-            value = u['profile_id'] ? 'https://www.linkedin.com/sales/lead/' + u['profile_id'] : '';
+            // Prefer the captured LinkedIn URL (e.g. /in/slug/) when available.
+            // Fallback to Sales Navigator lead URL for legacy data.
+            value = u['profile_url'] || (u['profile_id'] ? 'https://www.linkedin.com/sales/lead/' + u['profile_id'] : '');
           } else {
             value = u[key] || '';
           }
@@ -518,14 +520,14 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
         return;
       }
 
-      const header = ['name', 'title', 'company', 'company_id', 'location', 'about', 'tenure', 'profile_url'];
+      const header = ['name', 'title', 'company', 'company_id', 'location', 'about', 'tenure', 'profile_url', 'lead_source'];
       const csvRows = [header.join(',')];
 
       for (const u of all_users) {
         const row = header.map((key) => {
           let value;
           if (key === 'profile_url') {
-            value = u['profile_id'] ? 'https://www.linkedin.com/sales/lead/' + u['profile_id'] : '';
+            value = u['profile_url'] || (u['profile_id'] ? 'https://www.linkedin.com/sales/lead/' + u['profile_id'] : '');
           } else {
             value = u[key] || '';
           }
@@ -544,14 +546,14 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
         return;
       }
 
-      const header = ['name', 'title', 'company', 'company_id', 'location', 'about', 'tenure', 'profile_url'];
+      const header = ['name', 'title', 'company', 'company_id', 'location', 'about', 'tenure', 'profile_url', 'lead_source'];
       const csvRows = [header.join(',')];
 
       for (const u of all_users) {
         const row = header.map((key) => {
           let value;
           if (key === 'profile_url') {
-            value = u['profile_id'] ? 'https://www.linkedin.com/sales/lead/' + u['profile_id'] : '';
+            value = u['profile_url'] || (u['profile_id'] ? 'https://www.linkedin.com/sales/lead/' + u['profile_id'] : '');
           } else {
             value = u[key] || '';
           }

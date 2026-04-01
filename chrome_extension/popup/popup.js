@@ -81,11 +81,14 @@ function setAuthUI(state) {
 const API_BASE_URL = 'https://alpha-foundry.alphanext.tech';
 const CRM_IMPORT_URL = `${API_BASE_URL}/api/crm/import`;
 const CRM_IMPORT_JOBS_URL = `${API_BASE_URL}/api/crm/import/jobs`;
+const SENT_INVITATIONS_URL_FRAGMENT = '/mynetwork/invitation-manager/sent';
 // Backend enforces MAX_CSV_BYTES = 2 * 1024 * 1024 (UTF-8 bytes)
 // Add more headroom and split big exports to avoid upstream request-size/timeouts
 // that can surface as 503.
 const MAX_CRM_CSV_BYTES = 2 * 1024 * 1024;
 const MAX_CRM_CSV_BYTES_SAFE = 1 * 1024 * 1024; // ~1MB per request
+/** Leads `/api/crm/import` only: cap data rows per request (smaller payloads, easier retries). */
+const CRM_LEADS_MAX_ROWS_PER_REQUEST = 100;
 
 async function fetchWithAuth(url, options = {}) {
   return fetch(url, {
@@ -112,15 +115,34 @@ function sleep(ms) {
 async function parseResponseBodyMaybe(res) {
   const ct = res.headers.get('content-type') || '';
   try {
-    if (ct.includes('application/json')) return await res.json();
-  } catch {
-    // ignore; fallback to text
-  }
-  try {
-    return await res.text();
+    const text = await res.text();
+    const t = text.trim();
+    if (!t) return null;
+    if (/json/i.test(ct) || t.startsWith('{') || t.startsWith('[')) {
+      try {
+        return JSON.parse(text);
+      } catch {
+        return text;
+      }
+    }
+    return text;
   } catch {
     return null;
   }
+}
+
+/** CRM import POST returns { imported, alreadyExistsSkipped? }; legacy: skippedProfileUrl. */
+function accumulateCrmImportStats(data, totals) {
+  if (!data || typeof data !== 'object') return false;
+  const imp = Number(data.imported);
+  if (!Number.isFinite(imp)) return false;
+  totals.importedTotal += imp;
+  const rawSkip = data.alreadyExistsSkipped ?? data.skippedProfileUrl;
+  if (rawSkip !== undefined && rawSkip !== null && rawSkip !== '') {
+    const skipped = Number(rawSkip);
+    if (Number.isFinite(skipped)) totals.alreadyExistsSkippedTotal += skipped;
+  }
+  return true;
 }
 
 function splitCsvIntoChunksByByteSize(csvData, maxBytes) {
@@ -149,6 +171,45 @@ function splitCsvIntoChunksByByteSize(csvData, maxBytes) {
 
   if (current.length > 1) chunks.push(current.join('\r\n'));
   return chunks.length ? chunks : [csvData];
+}
+
+/**
+ * Split leads CSV into multiple files with the same header, each with at most `maxDataRows` data rows.
+ * Assumes no newlines inside fields (same as byte splitter).
+ */
+function splitCsvIntoChunksByDataRowCount(csvData, maxDataRows) {
+  if (!maxDataRows || maxDataRows < 1) return [csvData];
+  const normalized = String(csvData).replace(/\r\n/g, '\n');
+  const lines = normalized.split('\n').filter((l, idx) => !(idx > 0 && l.trim() === ''));
+  if (lines.length <= 1) return [csvData];
+
+  const headerLine = lines[0];
+  const rowLines = lines.slice(1);
+  if (rowLines.length <= maxDataRows) return [csvData];
+
+  const chunks = [];
+  for (let i = 0; i < rowLines.length; i += maxDataRows) {
+    chunks.push([headerLine, ...rowLines.slice(i, i + maxDataRows)].join('\r\n'));
+  }
+  return chunks.length ? chunks : [csvData];
+}
+
+/** Build POST bodies: leads = row cap then optional byte split; jobs/other = byte split only. */
+function buildCrmImportChunks(csvData, importUrl) {
+  let parts = [csvData];
+  if (importUrl === CRM_IMPORT_URL) {
+    parts = splitCsvIntoChunksByDataRowCount(csvData, CRM_LEADS_MAX_ROWS_PER_REQUEST);
+  }
+  const out = [];
+  for (const p of parts) {
+    const bytes = new Blob([p]).size;
+    if (bytes > MAX_CRM_CSV_BYTES_SAFE) {
+      out.push(...splitCsvIntoChunksByByteSize(p, MAX_CRM_CSV_BYTES_SAFE));
+    } else {
+      out.push(p);
+    }
+  }
+  return out;
 }
 
 async function getLeadsCsvData() {
@@ -196,6 +257,42 @@ async function getJobsDataFromActiveTab() {
   });
 }
 
+async function getSentInvitationsDataFromActiveTab() {
+  return new Promise((resolve) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (!tabs || !tabs[0] || !tabs[0].id) {
+        resolve({ ok: false, error: 'No active tab found' });
+        return;
+      }
+      chrome.tabs.sendMessage(tabs[0].id, { type: 'popup:get_sent_invitations_data' }, (resp) => {
+        if (!resp) {
+          resolve({ ok: false, error: 'Failed to scrape sent invitations (no response).' });
+          return;
+        }
+        resolve(resp);
+      });
+    });
+  });
+}
+
+function sentInvitationsToCsv(leads) {
+  const header = ['name', 'title', 'company', 'company_id', 'location', 'about', 'tenure', 'profile_url', 'lead_source'];
+  const rows = [header.join(',')];
+  for (const l of (leads || [])) {
+    const row = header.map((k) => escapeCsvCell(l?.[k] || ''));
+    rows.push(row.join(','));
+  }
+  return rows.join('\r\n');
+}
+
+async function getActiveTabUrl() {
+  return new Promise((resolve) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      resolve(tabs && tabs[0] ? tabs[0].url || '' : '');
+    });
+  });
+}
+
 async function sendCsvToBackend(csvData, importUrl = CRM_IMPORT_URL) {
   // Step 1: check auth
   let meRes;
@@ -221,19 +318,29 @@ async function sendCsvToBackend(csvData, importUrl = CRM_IMPORT_URL) {
     return;
   }
 
-  // Step 2: send CSV
+  // Step 2: send CSV (leads: ≤100 rows per request, then byte cap if needed)
   const csvBytes = new Blob([csvData]).size;
-  const chunks = csvBytes > MAX_CRM_CSV_BYTES_SAFE
-    ? splitCsvIntoChunksByByteSize(csvData, MAX_CRM_CSV_BYTES_SAFE)
-    : [csvData];
+  const chunks = buildCrmImportChunks(csvData, importUrl);
 
   if (chunks.length > 1) {
-    setCrmStatus(`CSV is large (${Math.round(csvBytes / 1024)} KB). Sending in ${chunks.length} chunks...`);
+    if (importUrl === CRM_IMPORT_URL) {
+      setCrmStatus(
+        `Sending ${chunks.length} batches (up to ${CRM_LEADS_MAX_ROWS_PER_REQUEST} leads each)...`
+      );
+    } else {
+      setCrmStatus(
+        `CSV is large (${Math.round(csvBytes / 1024)} KB). Sending in ${chunks.length} parts...`
+      );
+    }
   } else {
     setCrmStatus('Sending to CRM...', { show: true });
   }
 
-  let importedTotal = 0;
+  const totals = {
+    importedTotal: 0,
+    alreadyExistsSkippedTotal: 0,
+  };
+  let gotImportStats = false;
 
   for (let i = 0; i < chunks.length; i++) {
     const maxAttempts = 3;
@@ -241,7 +348,7 @@ async function sendCsvToBackend(csvData, importUrl = CRM_IMPORT_URL) {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       setCrmStatus(
-        `Sending chunk ${i + 1}/${chunks.length}... (attempt ${attempt}/${maxAttempts})`
+        `Sending batch ${i + 1}/${chunks.length}... (attempt ${attempt}/${maxAttempts})`
       );
 
       let res;
@@ -261,9 +368,8 @@ async function sendCsvToBackend(csvData, importUrl = CRM_IMPORT_URL) {
       }
 
       if (res.ok) {
-        // Expected JSON: { success: true, imported: number }
         const data = await parseResponseBodyMaybe(res);
-        if (data && typeof data.imported === 'number') importedTotal += data.imported;
+        if (accumulateCrmImportStats(data, totals)) gotImportStats = true;
         chunkSucceeded = true;
         break;
       }
@@ -336,7 +442,22 @@ async function sendCsvToBackend(csvData, importUrl = CRM_IMPORT_URL) {
     }
   }
 
-  setCrmStatus(`Success! CSV sent to CRM${importedTotal ? ` (imported ${importedTotal} leads)` : ''}.`);
+  if (gotImportStats) {
+    const { importedTotal, alreadyExistsSkippedTotal } = totals;
+    let msg;
+    if (importedTotal > 0 && alreadyExistsSkippedTotal > 0) {
+      msg = `Success! ${importedTotal} imported, ${alreadyExistsSkippedTotal} already existed and skipped.`;
+    } else if (importedTotal > 0) {
+      msg = `Success! ${importedTotal} imported.`;
+    } else if (alreadyExistsSkippedTotal > 0) {
+      msg = `Success! No new leads — ${alreadyExistsSkippedTotal} profile${alreadyExistsSkippedTotal === 1 ? '' : 's'} already existed and skipped.`;
+    } else {
+      msg = 'Success! Nothing new to import (no rows or all missing profile URLs).';
+    }
+    setCrmStatus(msg);
+  } else {
+    setCrmStatus('Success! CSV sent to CRM.');
+  }
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -388,8 +509,32 @@ document.addEventListener('DOMContentLoaded', () => {
   if (sendCrmBtn) {
     sendCrmBtn.addEventListener('click', async () => {
       sendCrmBtn.disabled = true;
-      setCrmStatus('Preparing CSV...', { show: true });
+      setCrmStatus('Checking page...', { show: true });
 
+      const activeUrl = await getActiveTabUrl();
+
+      // If user is on the sent invitations page, scrape directly from DOM
+      if (activeUrl.includes(SENT_INVITATIONS_URL_FRAGMENT)) {
+        setCrmStatus('Scraping selected invitations...', { show: true });
+        const resp = await getSentInvitationsDataFromActiveTab();
+        if (!resp || !resp.ok) {
+          setCrmStatus(resp?.error || 'Failed to scrape sent invitations. Make sure you are on the LinkedIn Sent Invitations page.');
+          sendCrmBtn.disabled = false;
+          return;
+        }
+        if (!resp.leads || !resp.leads.length) {
+          setCrmStatus('No invitations selected. Click Extract on invitation rows, then try again.');
+          sendCrmBtn.disabled = false;
+          return;
+        }
+        const csv = sentInvitationsToCsv(resp.leads);
+        setCrmStatus(`Preparing CSV (${resp.leads.length} leads)...`, { show: true });
+        await sendCsvToBackend(csv, CRM_IMPORT_URL);
+        sendCrmBtn.disabled = false;
+        return;
+      }
+
+      setCrmStatus('Preparing CSV...', { show: true });
       const csvResp = await getLeadsCsvData();
       if (!csvResp || !csvResp.ok || !csvResp.csv) {
         setCrmStatus(csvResp?.error || 'No CSV data to send. Please export leads first.');
