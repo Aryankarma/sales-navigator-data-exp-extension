@@ -9,10 +9,258 @@ s.onload = function() {
 // CRM `lead_source` CSV column — keep in sync with Alpha-Foundry `lib/crm/extension-lead-source.ts`
 var EXTENSION_LEAD_SOURCE = {
   LINKEDIN_CONNECTION: 'linkedin_connection',
+  /** 1:1 messaging thread — keep in sync with Alpha-Foundry `EXTENSION_LEAD_SOURCE_SLUGS.LINKEDIN_CONNECTION_MESSAGES` */
+  LINKEDIN_CONNECTION_MESSAGES: 'linkedin_connection_messages',
   LINKEDIN_SENT_INVITATIONS: 'linkedin_sent_invitations',
   LINKEDIN_SALES_LIST: 'linkedin_sales_list',
   LINKEDIN_SALES_SEARCH: 'linkedin_sales_search'
 };
+
+function is_messaging_thread_page() {
+  try {
+    return /\/messaging\/thread\//i.test(window.location.pathname || '');
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Scrape open LinkedIn 1:1 thread: counterparty profile card + all visible messages.
+ * DOM: `.msg-s-profile-card`, `li.msg-s-message-list__event` / `.msg-s-event-listitem`.
+ */
+function scrape_messaging_thread_for_crm() {
+  var $root = $('.msg-s-message-list-container, .msg-s-message-list').first();
+  if (!$root.length) {
+    return { ok: false, error: 'Message list not found. Open a conversation first.' };
+  }
+
+  var $card = $('.msg-s-profile-card').first();
+  if (!$card.length) {
+    return { ok: false, error: 'Profile card not found in this thread.' };
+  }
+
+  var $nameEl = $card.find('.profile-card-one-to-one__profile-link .truncate').first();
+  if (!$nameEl.length) {
+    $nameEl = $card.find('.artdeco-entity-lockup__title a span.truncate').first();
+  }
+  var name = $.trim($nameEl.text()) || '';
+
+  var $profileLink = $card.find('a.profile-card-one-to-one__profile-link[href*="/in/"]').first();
+  if (!$profileLink.length) {
+    $profileLink = $card.find('a[href*="/in/"]').first();
+  }
+  var href = ($profileLink.attr('href') || '').trim();
+  if (!href) {
+    return { ok: false, error: 'Could not read profile URL from thread header.' };
+  }
+  var profileUrl;
+  try {
+    profileUrl = new URL(href, window.location.origin).href;
+  } catch (err) {
+    profileUrl = href.indexOf('http') === 0 ? href : 'https://www.linkedin.com' + (href.indexOf('/') === 0 ? '' : '/') + href;
+  }
+
+  var $sub = $card.find('.artdeco-entity-lockup__subtitle div').first();
+  var title = $.trim($sub.attr('title') || $sub.text() || '');
+
+  var connectionDegree = '';
+  var $degA11y = $card.find('.a11y-text').filter(function () {
+    return /connection/i.test($(this).text() || '');
+  }).first();
+  if ($degA11y.length) connectionDegree = $.trim($degA11y.text());
+  if (!connectionDegree) {
+    connectionDegree = $.trim($card.find('.artdeco-entity-lockup__degree').text() || '');
+  }
+
+  var listReversed = $('.msg-s-message-list-container').is('.msg-s-message-list-container--column-reversed');
+
+  var messages = [];
+  var currentDateHeading = '';
+  var $content = $root.find('ul.msg-s-message-list-content').first();
+  if (!$content.length) $content = $root;
+
+  $content.children('li').each(function () {
+    var $li = $(this);
+    var $dh = $li.children('time.msg-s-message-list__time-heading');
+    if ($dh.length) {
+      currentDateHeading = $.trim($dh.first().text() || '');
+    }
+
+    if ($li.find('.msg-s-profile-card').length && !$li.find('.msg-s-event-listitem').length) {
+      return;
+    }
+
+    var $event = $li.find('.msg-s-event-listitem').first();
+    if (!$event.length) return;
+
+    var isOther = $event.hasClass('msg-s-event-listitem--other');
+    var from = $.trim($event.find('.msg-s-message-group__name').first().text() || '');
+    var time = $.trim($event.find('.msg-s-message-group__timestamp').first().text() || '');
+    var body = $.trim($event.find('.msg-s-event-listitem__body').first().text() || '');
+    var attachments = [];
+    $event.find('.ui-attachment__filename').each(function () {
+      var t = $.trim($(this).text() || '');
+      if (t) attachments.push(t);
+    });
+
+    var eventUrn = $event.attr('data-event-urn') || '';
+
+    messages.push({
+      from: from,
+      isOther: isOther,
+      time: time,
+      dateHeading: currentDateHeading,
+      body: body,
+      attachments: attachments,
+      eventUrn: eventUrn
+    });
+  });
+
+  var conversation = {
+    threadUrl: window.location.href,
+    scrapedAt: new Date().toISOString(),
+    listReversed: listReversed,
+    note:
+      'Only messages currently loaded in the page DOM are included. Scroll the thread to load older messages, then send again to refresh.',
+    profile: {
+      name: name,
+      title: title,
+      profileUrl: profileUrl,
+      connectionDegree: connectionDegree
+    },
+    messages: messages
+  };
+
+  var lead = {
+    name: name || null,
+    title: title || null,
+    company: null,
+    companyId: null,
+    location: null,
+    /** Thread text lives in `conversation` / CRM timeline only — not duplicated in about. */
+    about: null,
+    tenure: null,
+    profileUrl: profileUrl,
+    leadSource: EXTENSION_LEAD_SOURCE.LINKEDIN_CONNECTION_MESSAGES,
+    conversation: conversation
+  };
+
+  return { ok: true, lead: lead };
+}
+
+function post_messaging_lead_to_crm(done) {
+  var scraped = scrape_messaging_thread_for_crm();
+  if (!scraped.ok) {
+    if (typeof done === 'function') done(scraped);
+    return;
+  }
+  try {
+    if (chrome.runtime && chrome.runtime.id) {
+      var payloadStr;
+      try {
+        payloadStr = JSON.stringify({ leads: [scraped.lead] });
+      } catch (stringifyErr) {
+        if (typeof done === 'function') {
+          done({ ok: false, error: (stringifyErr && stringifyErr.message) || 'Could not serialize lead' });
+        }
+        return;
+      }
+      var stageKey = 'crm_import_body_' + Date.now() + '_' + Math.random().toString(36).slice(2, 11);
+      var setObj = {};
+      setObj[stageKey] = payloadStr;
+      chrome.storage.local.set(setObj, function () {
+        if (chrome.runtime.lastError) {
+          if (typeof done === 'function') {
+            done({ ok: false, error: chrome.runtime.lastError.message || 'storage failed' });
+          }
+          return;
+        }
+        chrome.runtime.sendMessage(
+          {
+            type: 'auth:fetch',
+            data: {
+              path: '/api/crm/import',
+              method: 'POST',
+              bodyStorageKey: stageKey
+            }
+          },
+          function (rsp) {
+            if (chrome.runtime.lastError) {
+              if (typeof done === 'function') {
+                done({ ok: false, error: chrome.runtime.lastError.message || 'No response from extension' });
+              }
+              return;
+            }
+            if (typeof done === 'function') done(rsp);
+          }
+        );
+      });
+    } else if (typeof done === 'function') {
+      done({ ok: false, error: 'Extension runtime unavailable' });
+    }
+  } catch (ex) {
+    if (typeof done === 'function') done({ ok: false, error: (ex && ex.message) || 'send failed' });
+  }
+}
+
+function ensure_messaging_thread_crm_ui() {
+  if (!is_messaging_thread_page()) return;
+  if (document.getElementById('ext-messaging-crm-root')) return;
+
+  var root = document.createElement('div');
+  root.id = 'ext-messaging-crm-root';
+
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'ext-messaging-crm-btn';
+  btn.textContent = 'Send this chat to CRM';
+  btn.title = 'Imports the other person’s profile + full visible thread as one lead (linkedin_connection_messages).';
+
+  var status = document.createElement('div');
+  status.className = 'ext-messaging-crm-status';
+  status.setAttribute('aria-live', 'polite');
+
+  btn.addEventListener('click', function () {
+    btn.disabled = true;
+    status.textContent = 'Sending…';
+    var sendFinished = false;
+    var timeoutId = setTimeout(function () {
+      if (sendFinished) return;
+      sendFinished = true;
+      btn.disabled = false;
+      status.textContent =
+        'Timed out. Open the extension popup → Send to CRM, or check login and network.';
+    }, 90000);
+    post_messaging_lead_to_crm(function (rsp) {
+      if (sendFinished) return;
+      sendFinished = true;
+      clearTimeout(timeoutId);
+      btn.disabled = false;
+      if (rsp && rsp.ok && rsp.data && typeof rsp.data === 'object') {
+        var imp = Number(rsp.data.imported);
+        var skip = Number(rsp.data.alreadyExistsSkipped);
+        if (Number.isFinite(imp) && imp > 0) status.textContent = 'Saved to CRM (' + imp + ' new).';
+        else if (Number.isFinite(skip) && skip > 0) status.textContent = 'Already in CRM (same profile URL).';
+        else if (rsp.data.success) status.textContent = 'Done.';
+        else status.textContent = 'Unexpected response from CRM.';
+      } else if (rsp && rsp.status === 401) {
+        status.textContent = 'Log in to Alpha Foundry (extension popup).';
+      } else {
+        var err =
+          rsp && rsp.data && rsp.data.error
+            ? rsp.data.error
+            : rsp && rsp.error
+              ? rsp.error
+              : 'Send failed';
+        status.textContent = String(err).slice(0, 120);
+      }
+    });
+  });
+
+  root.appendChild(btn);
+  root.appendChild(status);
+  document.body.appendChild(root);
+}
 
 // Handle callbacks from background script
 var callbacks = {};
@@ -53,6 +301,21 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
     } catch (e) {
       console.error('[Extension] Failed to scrape sent invitations:', e);
       sendResponse({ ok: false, error: (e && e.message) ? e.message : 'Failed to scrape sent invitations' });
+    }
+  }
+
+  // LinkedIn /messaging/thread/ — one lead + conversation JSON
+  if (request.type === 'popup:get_messaging_thread_data') {
+    try {
+      var msgScrape = scrape_messaging_thread_for_crm();
+      if (!msgScrape.ok) {
+        sendResponse(msgScrape);
+      } else {
+        sendResponse({ ok: true, lead: msgScrape.lead });
+      }
+    } catch (e) {
+      console.error('[Extension] Messaging thread scrape failed:', e);
+      sendResponse({ ok: false, error: (e && e.message) ? e.message : 'Failed to scrape messaging thread' });
     }
   }
 
@@ -1785,7 +2048,7 @@ async function start_check() {
             if (chrome.runtime && chrome.runtime.id) {
               chrome.runtime.sendMessage({
                 type: 'auth:fetch',
-                data: { path: '/api/crm/import', method: 'POST', body: { csv: csv } },
+                data: { path: '/api/crm/import', method: 'POST', body: { csv: String(csv) } },
                 callback_id: cb2
               }, function(rsp) {
                 // Background returns directly for auth:fetch
@@ -1856,6 +2119,11 @@ start_check();
 // Per-row Export button injection (runs every second)
 // ---------------------------------------------------------------------------
 function individual_finder_tick() {
+  if (is_messaging_thread_page()) {
+    ensure_messaging_thread_crm_ui();
+    return;
+  }
+
   if (is_sent_invitations_page()) {
     inject_sent_invitation_extract_buttons();
     ensure_select_all_button();
@@ -2018,6 +2286,8 @@ setInterval(function() {
     if (extension_button_int) clearInterval(extension_button_int);
     disconnect_jobs_dom_observer();
     disconnect_sales_list_dom_observer();
+    var staleMx = document.getElementById('ext-messaging-crm-root');
+    if (staleMx && staleMx.parentNode) staleMx.parentNode.removeChild(staleMx);
     // Remove select-all button on every navigation so it re-creates fresh
     var stale = document.getElementById('ext-select-all-btn');
     if (stale) stale.parentNode.removeChild(stale);

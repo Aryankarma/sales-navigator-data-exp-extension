@@ -18,14 +18,10 @@ function extractDisplayName(user) {
 }
 
 function setAuthedButtonsEnabled(enabled) {
-  const downloadBtn = document.getElementById('download_csv');
-  const exportJobsBtn = document.getElementById('export_all_jobs');
   const sendJobsBtn = document.getElementById('send_jobs_to_crm');
   const clearDataBtn = document.getElementById('clear_data');
   const sendCrmBtn = document.getElementById('send_to_crm');
 
-  if (downloadBtn) downloadBtn.disabled = !enabled;
-  if (exportJobsBtn) exportJobsBtn.disabled = !enabled;
   if (sendJobsBtn) sendJobsBtn.disabled = !enabled;
   if (clearDataBtn) clearDataBtn.disabled = !enabled;
   if (sendCrmBtn) sendCrmBtn.disabled = !enabled;
@@ -275,6 +271,33 @@ async function getSentInvitationsDataFromActiveTab() {
   });
 }
 
+async function getMessagingThreadFromActiveTab() {
+  return new Promise((resolve) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (!tabs || !tabs[0] || !tabs[0].id) {
+        resolve({ ok: false, error: 'No active tab found' });
+        return;
+      }
+      chrome.tabs.sendMessage(tabs[0].id, { type: 'popup:get_messaging_thread_data' }, (resp) => {
+        if (chrome.runtime.lastError) {
+          resolve({
+            ok: false,
+            error:
+              chrome.runtime.lastError.message ||
+              'No response from page. Reload the thread tab and try again.',
+          });
+          return;
+        }
+        if (!resp) {
+          resolve({ ok: false, error: 'Failed to read messaging thread (no response).' });
+          return;
+        }
+        resolve(resp);
+      });
+    });
+  });
+}
+
 function sentInvitationsToCsv(leads) {
   const header = ['name', 'title', 'company', 'company_id', 'location', 'about', 'tenure', 'profile_url', 'lead_source'];
   const rows = [header.join(',')];
@@ -293,7 +316,100 @@ async function getActiveTabUrl() {
   });
 }
 
+async function sendLeadsJsonToBackend(leads) {
+  if (!Array.isArray(leads) || leads.length === 0) {
+    setCrmStatus('No lead payload to send.');
+    return;
+  }
+
+  let meRes;
+  try {
+    meRes = await fetchWithAuth(`${API_BASE_URL}/api/me`, { method: 'GET' });
+  } catch (err) {
+    console.error('Failed to check /api/me:', err);
+    setCrmStatus('Auth check failed. Please try again.');
+    return;
+  }
+
+  if (!meRes.ok) {
+    if (meRes.status === 401) {
+      chrome.tabs.create({ url: `${API_BASE_URL}/login` });
+      setCrmStatus('Login required. Redirecting to login...');
+      chrome.runtime.sendMessage({ type: 'auth:get_state', data: { force: true } }, (state) => {
+        setAuthUI(state);
+      });
+      return;
+    }
+    setCrmStatus('Auth check failed. Please try again.');
+    return;
+  }
+
+  setCrmStatus('Sending conversation to CRM...', { show: true });
+
+  let res;
+  try {
+    res = await fetchWithAuth(CRM_IMPORT_URL, {
+      method: 'POST',
+      body: JSON.stringify({ leads }),
+    });
+  } catch (err) {
+    console.error('Failed to POST /api/crm/import (JSON leads):', err);
+    setCrmStatus('Network error while sending lead.');
+    return;
+  }
+
+  const body = await parseResponseBodyMaybe(res);
+
+  if (res.ok) {
+    const totals = { importedTotal: 0, alreadyExistsSkippedTotal: 0 };
+    if (accumulateCrmImportStats(body, totals)) {
+      const { importedTotal, alreadyExistsSkippedTotal } = totals;
+      let msg;
+      if (importedTotal > 0 && alreadyExistsSkippedTotal > 0) {
+        msg = `Success! ${importedTotal} imported, ${alreadyExistsSkippedTotal} already existed (same profile URL).`;
+      } else if (importedTotal > 0) {
+        msg = `Success! Conversation saved as ${importedTotal} lead.`;
+      } else if (alreadyExistsSkippedTotal > 0) {
+        msg = `Already in CRM — this profile URL exists (${alreadyExistsSkippedTotal}). Open CRM to view transcript.`;
+      } else {
+        msg = 'Request OK — nothing new imported.';
+      }
+      setCrmStatus(msg);
+    } else {
+      setCrmStatus('Success! Lead payload sent to CRM.');
+    }
+    return;
+  }
+
+  if (res.status === 401) {
+    chrome.tabs.create({ url: `${API_BASE_URL}/login` });
+    setCrmStatus('Login required. Redirecting...');
+    return;
+  }
+
+  const msg =
+    body && typeof body === 'object' && body.error
+      ? body.error
+      : `Import failed (${res.status}).`;
+  setCrmStatus(typeof msg === 'string' ? msg : 'Import failed.');
+}
+
+function normalizeCsvPayloadForImport(csvData) {
+  if (csvData == null) return '';
+  if (typeof csvData === 'string') return csvData;
+  if (Array.isArray(csvData) && csvData.every((x) => typeof x === 'string')) {
+    return csvData.join('\r\n');
+  }
+  return String(csvData);
+}
+
 async function sendCsvToBackend(csvData, importUrl = CRM_IMPORT_URL) {
+  const csvNormalized = normalizeCsvPayloadForImport(csvData);
+  if (!csvNormalized.trim()) {
+    setCrmStatus('No CSV data to send.');
+    return;
+  }
+
   // Step 1: check auth
   let meRes;
   try {
@@ -319,8 +435,8 @@ async function sendCsvToBackend(csvData, importUrl = CRM_IMPORT_URL) {
   }
 
   // Step 2: send CSV (leads: ≤100 rows per request, then byte cap if needed)
-  const csvBytes = new Blob([csvData]).size;
-  const chunks = buildCrmImportChunks(csvData, importUrl);
+  const csvBytes = new Blob([csvNormalized]).size;
+  const chunks = buildCrmImportChunks(csvNormalized, importUrl);
 
   if (chunks.length > 1) {
     if (importUrl === CRM_IMPORT_URL) {
@@ -497,14 +613,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // Existing export UI (only enabled when authenticated).
-
-  document.getElementById('download_csv').addEventListener('click', () => {
-    chrome.runtime.sendMessage({ type: 'popup:download_csv' }, () => {
-      updateCount();
-    });
-  });
-
   const sendCrmBtn = document.getElementById('send_to_crm');
   if (sendCrmBtn) {
     sendCrmBtn.addEventListener('click', async () => {
@@ -512,6 +620,37 @@ document.addEventListener('DOMContentLoaded', () => {
       setCrmStatus('Checking page...', { show: true });
 
       const activeUrl = await getActiveTabUrl();
+
+      let messagingUrl;
+      try {
+        messagingUrl = new URL(activeUrl);
+      } catch {
+        messagingUrl = null;
+      }
+      if (
+        messagingUrl &&
+        messagingUrl.hostname.includes('linkedin.com') &&
+        messagingUrl.pathname.includes('/messaging/thread/')
+      ) {
+        setCrmStatus('Reading conversation…', { show: true });
+        const msgResp = await getMessagingThreadFromActiveTab();
+        if (!msgResp || !msgResp.ok) {
+          setCrmStatus(
+            msgResp?.error ||
+              'Could not read this thread. Open a 1:1 LinkedIn message and try again.',
+          );
+          sendCrmBtn.disabled = false;
+          return;
+        }
+        if (!msgResp.lead) {
+          setCrmStatus('No lead extracted from this page.');
+          sendCrmBtn.disabled = false;
+          return;
+        }
+        await sendLeadsJsonToBackend([msgResp.lead]);
+        sendCrmBtn.disabled = false;
+        return;
+      }
 
       // If user is on the sent invitations page, scrape directly from DOM
       if (activeUrl.includes(SENT_INVITATIONS_URL_FRAGMENT)) {
@@ -537,7 +676,10 @@ document.addEventListener('DOMContentLoaded', () => {
       setCrmStatus('Preparing CSV...', { show: true });
       const csvResp = await getLeadsCsvData();
       if (!csvResp || !csvResp.ok || !csvResp.csv) {
-        setCrmStatus(csvResp?.error || 'No CSV data to send. Please export leads first.');
+        setCrmStatus(
+          csvResp?.error ||
+            'No saved leads to send. Extract profiles on Sales Navigator first, then try again.',
+        );
         sendCrmBtn.disabled = false;
         return;
       }
@@ -546,29 +688,6 @@ document.addEventListener('DOMContentLoaded', () => {
       sendCrmBtn.disabled = false;
     });
   }
-
-  document.getElementById('export_all_jobs').addEventListener('click', () => {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      if (tabs[0]) {
-        const btn = document.getElementById('export_all_jobs');
-        const originalText = btn.textContent;
-        btn.textContent = 'Scraping...';
-        btn.disabled = true;
-
-        chrome.tabs.sendMessage(tabs[0].id, { type: 'popup:export_jobs' }, (response) => {
-          if (response && response.ok) {
-            btn.textContent = `Scraped ${response.count} jobs!`;
-          } else {
-            btn.textContent = 'Failed or No jobs found';
-          }
-          setTimeout(() => {
-            btn.textContent = originalText;
-            btn.disabled = false;
-          }, 3000);
-        });
-      }
-    });
-  });
 
   const sendJobsBtn = document.getElementById('send_jobs_to_crm');
   if (sendJobsBtn) {

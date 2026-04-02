@@ -275,8 +275,10 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
     // Generic authenticated API bridge for extension pages.
     // Usage example (from popup or content scripts):
     // chrome.runtime.sendMessage({ type:'auth:fetch', data:{ path:'/api/data', method:'POST', body:{...} } })
+    // For large POST bodies (e.g. LinkedIn thread JSON), pass bodyStorageKey: staging key in chrome.storage.local
+    // whose value is a pre-stringified JSON body — avoids sendMessage structured-clone / size limits.
     if (request.type === 'auth:fetch') {
-      const { path, url, method = 'GET', body, headers } = request.data || {};
+      const { path, url, method = 'GET', body, headers, bodyStorageKey } = request.data || {};
 
       const targetUrl = url || (path ? `${AUTH_BASE_URL}${path}` : null);
       if (!targetUrl || !isTrustedAuthUrl(targetUrl)) {
@@ -288,12 +290,32 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
         method: method.toUpperCase(),
         headers: headers || {}
       };
-      if (body !== undefined && body !== null) fetchOptions.body = JSON.stringify(body);
+
+      if (bodyStorageKey) {
+        const store = await chrome.storage.local.get(bodyStorageKey);
+        const raw = store[bodyStorageKey];
+        await chrome.storage.local.remove(bodyStorageKey);
+        if (raw == null || typeof raw !== 'string') {
+          sendResponse({ ok: false, status: 400, error: 'Missing staged request body' });
+          return;
+        }
+        fetchOptions.body = raw;
+      } else if (body !== undefined && body !== null) {
+        fetchOptions.body = JSON.stringify(body);
+      }
 
       try {
         const resp = await fetchWithAuth(targetUrl, fetchOptions);
         const data = resp.status === 204 ? null : await parseResponseBody(resp);
-        sendResponse({ ok: resp.ok, status: resp.status, data });
+        try {
+          sendResponse({ ok: resp.ok, status: resp.status, data });
+        } catch (cloneErr) {
+          sendResponse({
+            ok: false,
+            status: 500,
+            error: 'Response could not be delivered to the page (try popup).'
+          });
+        }
       } catch (err) {
         if (err && err.code === 'UNAUTHORIZED') {
           sendResponse({ ok: false, status: 401, error: 'Unauthorized', loggedOut: true });
