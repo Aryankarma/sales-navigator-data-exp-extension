@@ -18,10 +18,14 @@ function extractDisplayName(user) {
 }
 
 function setAuthedButtonsEnabled(enabled) {
+  const downloadBtn = document.getElementById('download_csv');
+  const exportJobsBtn = document.getElementById('export_all_jobs');
   const sendJobsBtn = document.getElementById('send_jobs_to_crm');
   const clearDataBtn = document.getElementById('clear_data');
   const sendCrmBtn = document.getElementById('send_to_crm');
 
+  if (downloadBtn) downloadBtn.disabled = !enabled;
+  if (exportJobsBtn) exportJobsBtn.disabled = !enabled;
   if (sendJobsBtn) sendJobsBtn.disabled = !enabled;
   if (clearDataBtn) clearDataBtn.disabled = !enabled;
   if (sendCrmBtn) sendCrmBtn.disabled = !enabled;
@@ -613,6 +617,12 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  document.getElementById('download_csv').addEventListener('click', () => {
+    chrome.runtime.sendMessage({ type: 'popup:download_csv' }, () => {
+      updateCount();
+    });
+  });
+
   const sendCrmBtn = document.getElementById('send_to_crm');
   if (sendCrmBtn) {
     sendCrmBtn.addEventListener('click', async () => {
@@ -688,6 +698,29 @@ document.addEventListener('DOMContentLoaded', () => {
       sendCrmBtn.disabled = false;
     });
   }
+
+  document.getElementById('export_all_jobs').addEventListener('click', () => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (tabs[0]) {
+        const btn = document.getElementById('export_all_jobs');
+        const originalText = btn.textContent;
+        btn.textContent = 'Scraping...';
+        btn.disabled = true;
+
+        chrome.tabs.sendMessage(tabs[0].id, { type: 'popup:export_jobs' }, (response) => {
+          if (response && response.ok) {
+            btn.textContent = `Scraped ${response.count} jobs!`;
+          } else {
+            btn.textContent = 'Failed or No jobs found';
+          }
+          setTimeout(() => {
+            btn.textContent = originalText;
+            btn.disabled = false;
+          }, 3000);
+        });
+      }
+    });
+  });
 
   const sendJobsBtn = document.getElementById('send_jobs_to_crm');
   if (sendJobsBtn) {
