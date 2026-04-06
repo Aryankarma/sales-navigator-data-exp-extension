@@ -131,7 +131,7 @@ async function parseResponseBodyMaybe(res) {
   }
 }
 
-/** CRM import POST returns { imported, alreadyExistsSkipped? }; legacy: skippedProfileUrl. */
+/** CRM import POST returns { imported, alreadyExistsSkipped?, duplicateRowsInBatchSkipped?, incomingRowCount?, uniqueRowsAttempted? }; legacy: skippedProfileUrl. */
 function accumulateCrmImportStats(data, totals) {
   if (!data || typeof data !== 'object') return false;
   const imp = Number(data.imported);
@@ -142,6 +142,15 @@ function accumulateCrmImportStats(data, totals) {
     const skipped = Number(rawSkip);
     if (Number.isFinite(skipped)) totals.alreadyExistsSkippedTotal += skipped;
   }
+  const rawDup = data.duplicateRowsInBatchSkipped;
+  if (rawDup !== undefined && rawDup !== null && rawDup !== '') {
+    const dup = Number(rawDup);
+    if (Number.isFinite(dup)) totals.duplicateRowsInBatchSkippedTotal += dup;
+  }
+  const inc = Number(data.incomingRowCount);
+  if (Number.isFinite(inc) && inc > 0) totals.incomingRowCountTotal += inc;
+  const uq = Number(data.uniqueRowsAttempted);
+  if (Number.isFinite(uq) && uq >= 0) totals.uniqueRowsAttemptedTotal += uq;
   return true;
 }
 
@@ -230,13 +239,62 @@ function escapeCsvCell(value) {
 }
 
 function jobsToCsv(jobs) {
-  const header = ['title', 'company', 'location', 'posted', 'link'];
-  const rows = [header.join(',')];
-  for (const j of (jobs || [])) {
-    const row = header.map((k) => escapeCsvCell(j?.[k] || ''));
-    rows.push(row.join(','));
+  const cols = [
+    { key: 'title', header: 'title' },
+    { key: 'company', header: 'company' },
+    { key: 'location', header: 'location' },
+    { key: 'posted', header: 'posted' },
+    { key: 'link', header: 'link' },
+    { key: 'jobUrl', header: 'Job URL' },
+  ];
+  const rows = [cols.map((c) => c.header).join(',')];
+  for (const j of jobs || []) {
+    rows.push(cols.map((c) => escapeCsvCell(j?.[c.key] || '')).join(','));
   }
   return rows.join('\r\n');
+}
+
+/**
+ * Warn when Job URL column looks broken: mostly empty or mostly the same URL.
+ */
+function getJobsJobUrlScrapeWarning(jobs) {
+  if (!jobs || jobs.length < 2) return '';
+  const n = jobs.length;
+  const raw = jobs.map((j) => String(j.jobUrl || '').trim());
+
+  function normalizeUrl(u) {
+    if (!u) return '';
+    try {
+      const x = new URL(u.replace(/\/+$/, ''));
+      return (x.origin + x.pathname + x.search).toLowerCase();
+    } catch {
+      return u.replace(/\/+$/, '').toLowerCase();
+    }
+  }
+
+  const normalized = raw.map(normalizeUrl);
+  const emptyCount = normalized.filter((u) => !u).length;
+
+  if (emptyCount >= 2 && emptyCount / n >= 0.5) {
+    return `Could not scrape Job URLs properly for ${emptyCount} of ${n} jobs (Job URL column is empty). Open each listing so the address bar shows ?currentJobId=..., then tap Extract on that row.`;
+  }
+
+  const freq = {};
+  for (const u of normalized) {
+    if (!u) continue;
+    freq[u] = (freq[u] || 0) + 1;
+  }
+  const entries = Object.entries(freq);
+  if (!entries.length) {
+    return `Could not scrape Job URLs properly for all ${n} jobs (no Job URLs captured). Focus each job so LinkedIn updates the URL, then Extract.`;
+  }
+  entries.sort((a, b) => b[1] - a[1]);
+  const [, dominantCount] = entries[0];
+  if (dominantCount >= 2 && dominantCount / n >= 0.5) {
+    const dupJobs = dominantCount;
+    return `Could not scrape Job URLs properly for ${dupJobs} of ${n} jobs - they share the same Job URL. Click each job so ?currentJobId=... matches that listing, then Extract (do not rely on Select All without opening each job).`;
+  }
+  return '';
 }
 
 async function getJobsDataFromActiveTab() {
@@ -374,9 +432,9 @@ async function sendLeadsJsonToBackend(leads) {
       } else if (importedTotal > 0) {
         msg = `Success! Conversation saved as ${importedTotal} lead.`;
       } else if (alreadyExistsSkippedTotal > 0) {
-        msg = `Already in CRM — this profile URL exists (${alreadyExistsSkippedTotal}). Open CRM to view transcript.`;
+        msg = `Already in CRM - this profile URL exists (${alreadyExistsSkippedTotal}). Open CRM to view transcript.`;
       } else {
-        msg = 'Request OK — nothing new imported.';
+        msg = 'Request OK - nothing new imported.';
       }
       setCrmStatus(msg);
     } else {
@@ -407,7 +465,7 @@ function normalizeCsvPayloadForImport(csvData) {
   return String(csvData);
 }
 
-async function sendCsvToBackend(csvData, importUrl = CRM_IMPORT_URL) {
+async function sendCsvToBackend(csvData, importUrl = CRM_IMPORT_URL, options = {}) {
   const csvNormalized = normalizeCsvPayloadForImport(csvData);
   if (!csvNormalized.trim()) {
     setCrmStatus('No CSV data to send.');
@@ -459,6 +517,9 @@ async function sendCsvToBackend(csvData, importUrl = CRM_IMPORT_URL) {
   const totals = {
     importedTotal: 0,
     alreadyExistsSkippedTotal: 0,
+    duplicateRowsInBatchSkippedTotal: 0,
+    incomingRowCountTotal: 0,
+    uniqueRowsAttemptedTotal: 0,
   };
   let gotImportStats = false;
 
@@ -563,20 +624,63 @@ async function sendCsvToBackend(csvData, importUrl = CRM_IMPORT_URL) {
   }
 
   if (gotImportStats) {
-    const { importedTotal, alreadyExistsSkippedTotal } = totals;
+    const {
+      importedTotal,
+      alreadyExistsSkippedTotal,
+      duplicateRowsInBatchSkippedTotal = 0,
+      incomingRowCountTotal = 0,
+      uniqueRowsAttemptedTotal = 0,
+    } = totals;
+    const isJobsImport = importUrl === CRM_IMPORT_JOBS_URL;
     let msg;
     if (importedTotal > 0 && alreadyExistsSkippedTotal > 0) {
       msg = `Success! ${importedTotal} imported, ${alreadyExistsSkippedTotal} already existed and skipped.`;
     } else if (importedTotal > 0) {
       msg = `Success! ${importedTotal} imported.`;
     } else if (alreadyExistsSkippedTotal > 0) {
-      msg = `Success! No new leads — ${alreadyExistsSkippedTotal} profile${alreadyExistsSkippedTotal === 1 ? '' : 's'} already existed and skipped.`;
+      msg = isJobsImport
+        ? duplicateRowsInBatchSkippedTotal > 0 &&
+            incomingRowCountTotal > 0 &&
+            uniqueRowsAttemptedTotal > 0
+          ? `No new jobs. CRM got ${incomingRowCountTotal} row${
+              incomingRowCountTotal === 1 ? '' : 's'
+            } from your selection but only ${uniqueRowsAttemptedTotal} distinct job URL${
+              uniqueRowsAttemptedTotal === 1 ? '' : 's'
+            }; ${duplicateRowsInBatchSkippedTotal} row${
+              duplicateRowsInBatchSkippedTotal === 1 ? '' : 's'
+            } repeated the same link. ${
+              alreadyExistsSkippedTotal === uniqueRowsAttemptedTotal
+                ? 'All of those are already in CRM.'
+                : `${alreadyExistsSkippedTotal} already in CRM.`
+            }`
+          : duplicateRowsInBatchSkippedTotal > 0
+            ? `No new jobs: ${alreadyExistsSkippedTotal} unique job link${
+                alreadyExistsSkippedTotal === 1 ? '' : 's'
+              } already in CRM. ${duplicateRowsInBatchSkippedTotal} duplicate row${
+                duplicateRowsInBatchSkippedTotal === 1 ? '' : 's'
+              } in your selection used the same link(s) again.`
+            : `Success! No new jobs - ${alreadyExistsSkippedTotal} job link${
+                alreadyExistsSkippedTotal === 1 ? '' : 's'
+              } already existed and skipped.`
+        : `Success! No new leads - ${alreadyExistsSkippedTotal} profile${alreadyExistsSkippedTotal === 1 ? '' : 's'} already existed and skipped.`;
     } else {
-      msg = 'Success! Nothing new to import (no rows or all missing profile URLs).';
+      msg = isJobsImport
+        ? "Success! Jobs import finished. If you don't see them in CRM, refresh the Jobs tab."
+        : "Success! Nothing new to import (no rows or all missing profile URLs).";
     }
-    setCrmStatus(msg);
+    let finalMsg = msg;
+    if (isJobsImport && options.jobs && options.jobs.length) {
+      const urlWarn = getJobsJobUrlScrapeWarning(options.jobs);
+      if (urlWarn) finalMsg = `${finalMsg}\n\n${urlWarn}`;
+    }
+    setCrmStatus(finalMsg);
   } else {
-    setCrmStatus('Success! CSV sent to CRM.');
+    let finalMsg = 'Success! CSV sent to CRM.';
+    if (importUrl === CRM_IMPORT_JOBS_URL && options.jobs && options.jobs.length) {
+      const urlWarn = getJobsJobUrlScrapeWarning(options.jobs);
+      if (urlWarn) finalMsg = `${finalMsg}\n\n${urlWarn}`;
+    }
+    setCrmStatus(finalMsg);
   }
 }
 
@@ -642,7 +746,7 @@ document.addEventListener('DOMContentLoaded', () => {
         messagingUrl.hostname.includes('linkedin.com') &&
         messagingUrl.pathname.includes('/messaging/thread/')
       ) {
-        setCrmStatus('Reading conversation…', { show: true });
+        setCrmStatus('Reading conversation...', { show: true });
         const msgResp = await getMessagingThreadFromActiveTab();
         if (!msgResp || !msgResp.ok) {
           setCrmStatus(
@@ -745,7 +849,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const csv = jobsToCsv(resp.jobs);
       setCrmStatus(`Preparing CSV (${resp.jobs.length} jobs)...`, { show: true });
-      await sendCsvToBackend(csv, CRM_IMPORT_JOBS_URL);
+      await sendCsvToBackend(csv, CRM_IMPORT_JOBS_URL, { jobs: resp.jobs });
       sendJobsBtn.disabled = false;
     });
   }

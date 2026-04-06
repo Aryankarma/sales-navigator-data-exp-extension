@@ -222,7 +222,7 @@ function ensure_messaging_thread_crm_ui() {
 
   btn.addEventListener('click', function () {
     btn.disabled = true;
-    status.textContent = 'Sending…';
+    status.textContent = 'Sending...';
     var sendFinished = false;
     var timeoutId = setTimeout(function () {
       if (sendFinished) return;
@@ -471,7 +471,163 @@ function ensure_jobs_dom_observer() {
   }
 }
 
-function make_extract_btn($item) {
+/**
+ * Best-effort numeric job posting id for a single job card/list row.
+ * New LinkedIn search cards often have NO in-card <a href="/jobs/view/...">; using the page URL's
+ * currentJobId for every row is wrong (it's whichever job the detail pane is showing).
+ */
+function extractLinkedInJobViewIdFromCard($item) {
+  if (!$item || !$item.length) return '';
+  var scored = {}; // id -> score
+
+  function add(id, weight) {
+    var n = String(id == null ? '' : id).replace(/\D/g, '');
+    if (!n || n.length < 6 || n.length > 15) return;
+    scored[n] = (scored[n] || 0) + weight;
+  }
+
+  // 1) Walk ancestors — classic list rows expose data-occludable-job-id on <li>
+  var $walk = $item.first();
+  for (var depth = 0; depth < 22 && $walk.length; depth++) {
+    add($walk.attr('data-occludable-job-id'), 120);
+    add($walk.attr('data-job-id'), 115);
+    var urnA =
+      $walk.attr('data-entity-urn') ||
+      $walk.attr('data-chameleon-result-urn') ||
+      $walk.attr('data-chameleon-result') ||
+      '';
+    var mA = urnA.match(/jobPost(?:ing)?[:\/](\d{6,})/i);
+    if (mA) add(mA[1], 110);
+    $walk = $walk.parent();
+  }
+
+  // 2) Descendants — urns and explicit ids
+  $item.find('[data-entity-urn*="jobPosting"], [data-entity-urn*="jobPost:"], [data-entity-urn*="JobPosting"]').each(function () {
+    var urn = $(this).attr('data-entity-urn') || '';
+    var m = urn.match(/jobPost(?:ing)?[:\/](\d{6,})/i);
+    if (m) add(m[1], 100);
+  });
+  $item.find('[data-job-id], [data-occludable-job-id]').each(function () {
+    add($(this).attr('data-job-id'), 95);
+    add($(this).attr('data-occludable-job-id'), 95);
+  });
+
+  // 3) Links: plain /jobs/view/ beats search-results?currentJobId= (often the focused job only)
+  $item.find('a[href*="/jobs/view/"]').each(function () {
+    var h = $(this).attr('href') || '';
+    var mv = h.match(/\/jobs\/view\/(\d{6,})/);
+    if (!mv) return;
+    var w = /jobs\/search-results/i.test(h) ? 45 : 85;
+    add(mv[1], w);
+  });
+  $item.find('a[href*="currentJobId="]').each(function () {
+    var h = $(this).attr('href') || '';
+    var mc = h.match(/currentJobId=(\d{6,})/);
+    if (mc) add(mc[1], 40);
+  });
+
+  // 4) Serialized markup — Voyager / React sometimes embed urn:li:jobPosting:NNNNNN
+  var el0 = $item.first()[0];
+  if (el0 && el0.innerHTML && el0.innerHTML.length < 400000) {
+    var html = el0.innerHTML;
+    var reUrn = /urn:li:jobPost(?:ing)?:(\d{6,})/gi;
+    var mu;
+    while ((mu = reUrn.exec(html)) !== null) add(mu[1], 88);
+    var reJp = /jobPosting["']?\s*[:=]\s*["']?(\d{6,})/gi;
+    while ((mu = reJp.exec(html)) !== null) add(mu[1], 55);
+  }
+
+  var best = '';
+  var bestScore = -1;
+  Object.keys(scored).forEach(function (id) {
+    if (scored[id] > bestScore) {
+      bestScore = scored[id];
+      best = id;
+    }
+  });
+  return best;
+}
+
+function jobViewUrlFromId(id) {
+  return id ? 'https://www.linkedin.com/jobs/view/' + id : '';
+}
+
+/**
+ * Latest jobs `currentJobId` query param, synced by `linkedin-jobs-history-hook-main.js` (MAIN world)
+ * onto `document.documentElement[data-le-current-job-id]` on every pushState/replaceState/popstate.
+ */
+function readLinkedInHistoryCurrentJobId() {
+  try {
+    var v = document.documentElement.getAttribute('data-le-current-job-id');
+    if (!v) return '';
+    var n = String(v).replace(/\D/g, '');
+    return n || '';
+  } catch (e) {
+    return '';
+  }
+}
+
+/** Canonical job URL from history navigation (trailing slash per product spec). */
+function buildJobUrlFromHistoryJobId(id) {
+  var n = String(id == null ? '' : id).replace(/\D/g, '');
+  return n ? 'https://www.linkedin.com/jobs/view/' + n + '/' : '';
+}
+
+/**
+ * When the user selects a row, bind the most recent `currentJobId` to this button.
+ * Polls briefly because LinkedIn may update the URL right after the click.
+ */
+function attachHistoryJobUrlToExtractButton($b) {
+  function apply() {
+    var hid = readLinkedInHistoryCurrentJobId();
+    $b.data('le-job-url', hid ? buildJobUrlFromHistoryJobId(hid) : '');
+  }
+  apply();
+  var n = 0;
+  function tick() {
+    n++;
+    apply();
+    if (n < 12) setTimeout(tick, 100);
+  }
+  setTimeout(tick, 50);
+}
+
+/** Prefer per-card DOM; optional button stores a short-lived capture from select. */
+function resolveJobLinkForJobCard($item, $btn) {
+  var jid = extractLinkedInJobViewIdFromCard($item);
+  if (jid) return jobViewUrlFromId(jid);
+  if ($btn && $btn.length) {
+    var cap = $btn.data('captured-link');
+    if (cap) return String(cap);
+  }
+  return '';
+}
+
+/**
+ * After click, LinkedIn may hydrate job id or update URL — poll briefly; never trust URL alone on first tick.
+ */
+function tryDeferJobLinkCapture($b, $scope) {
+  var n = 0;
+  function tick() {
+    n++;
+    var jid = extractLinkedInJobViewIdFromCard($scope);
+    if (jid) {
+      $b.data('captured-link', jobViewUrlFromId(jid));
+      return;
+    }
+    if (!$b.data('captured-link')) {
+      var pm = window.location.href.match(/currentJobId=(\d+)/);
+      if (pm) $b.data('captured-link', jobViewUrlFromId(pm[1]));
+    }
+    if (n < 12 && !$b.data('captured-link')) {
+      setTimeout(tick, 100);
+    }
+  }
+  tick();
+}
+
+function make_extract_btn($scopeCard) {
+  var $scope = $scopeCard && $scopeCard.length ? $scopeCard : $();
   var $btn = $('<div/>').addClass('extension-individual-button available jobs-extract-btn').html('Extract');
   $btn.css({
     margin: '0 0 0 8px',
@@ -502,16 +658,16 @@ function make_extract_btn($item) {
       if ($b.hasClass('added')) {
         $b.removeClass('added').addClass('available').html('Extract').css({ background: '#fff', color: '#0073b1', border: '1px solid #0073b1' });
         $b.removeData('captured-link');
+        $b.removeData('le-job-url');
       } else {
         $b.removeClass('available').addClass('added').html('Selected').css({ background: '#0073b1', color: '#fff', border: '1px solid #0073b1' });
-        // Capture the currentJobId from the page URL at selection time.
-        // When a user clicks a job card on LinkedIn, the URL updates to include
-        // currentJobId=XXXXX. Since our button is inside the card, clicking it
-        // also activates that card, so the URL reflects this specific job.
-        var pageMatch = window.location.href.match(/currentJobId=(\d+)/);
-        if (pageMatch) {
-          $b.data('captured-link', 'https://www.linkedin.com/jobs/view/' + pageMatch[1]);
+        var jidNow = extractLinkedInJobViewIdFromCard($scope);
+        if (jidNow) {
+          $b.data('captured-link', jobViewUrlFromId(jidNow));
+        } else {
+          tryDeferJobLinkCapture($b, $scope);
         }
+        attachHistoryJobUrlToExtractButton($b);
       }
     });
   return $btn;
@@ -632,7 +788,7 @@ function ensure_select_all_button() {
 
   var maxLabel = document.createElement('div');
   maxLabel.id = 'ext-range-max';
-  maxLabel.textContent = 'max: —';
+  maxLabel.textContent = 'max: -';
   maxLabel.setAttribute('style', 'font-size:12px;opacity:0.85;padding:0 6px;');
 
   var applyBtn = document.createElement('button');
@@ -773,6 +929,8 @@ function job_row_is_selected($item) {
 
 function scrape_job_title_company_location_posted($item) {
   var title = '';
+
+  // Method 1: title from dismiss button aria-label ("Dismiss <title> job")
   var $dismiss = $item
     .find('button[aria-label*="Dismiss"]')
     .filter(function () {
@@ -785,120 +943,122 @@ function scrape_job_title_company_location_posted($item) {
     if (dm && dm[1]) title = dm[1].replace(/\s+/g, ' ').trim();
   }
 
+  // Method 2: aria-hidden="true" span inside the title paragraph (clean, no "(Verified job)" suffix)
   if (!title) {
-    title =
-      $item.find('.f55dc56d span._4c50b7df').first().text().trim() ||
-      $item.find('.f55dc56d').first().text().trim();
+    $item.find('p span[aria-hidden="true"]').each(function () {
+      var t = $(this).clone().children('span').remove().end().text().replace(/\s+/g, ' ').trim();
+      if (t && !/^\d+\s*\+?\s*results?$/i.test(t) && !/^99\+/i.test(t)) {
+        title = t;
+        return false;
+      }
+    });
   }
+
+  // Method 3: legacy selectors
   if (!title) {
-    title = $item
-      .find(
-        'a.job-card-container__link, .job-card-list__title, h3 a, h3, [data-testid="job-card-title"]',
-      )
-      .first()
-      .text()
-      .trim();
+    title = $item.find('a.job-card-container__link, .job-card-list__title, h3 a, h3, [data-testid="job-card-title"]')
+      .first().text().trim();
   }
   if (!title) {
     title = $item.find('a[href*="/jobs/view/"]').first().text().trim();
   }
 
-  function is_likely_results_count_or_noise(t) {
+  function is_noise(t) {
     if (!t) return true;
     if (/^\d+\s*\+?\s*results?$/i.test(t)) return true;
     if (/^99\+/i.test(t)) return true;
-    if (/\d+\s*\+\s*results?/i.test(t)) return true;
     if (/are these results helpful/i.test(t)) return true;
     return false;
   }
 
-  // New feed: company sits in div.a390a9fc > p without class a390a9fc on the p; location line uses p.a390a9fc.
-  var $companyP = $item.find('div.a390a9fc > p').filter(function () {
-    return !$(this).hasClass('a390a9fc');
+  // Company: LinkedIn rotates obfuscated class names.
+  //
+  // Current feed (2025+): company is in div._64713141 with a direct child <p> (e.g. "StackOne").
+  // The location line is a *sibling* <p class="... _64713141 ..."> — class on <p>, not wrapping div.
+  // Older: div._8f149b47 > p
+  var company = '';
+  var $newCompanyWrap = $item.find('div._64713141').filter(function () {
+    return $(this).children('p').length > 0;
   }).first();
-  var company = ($companyP.length && $companyP.text().trim()) || '';
-  if (is_likely_results_count_or_noise(company)) company = '';
-
-  if (!company) {
-    company = $item.find('._41247193').first().text().trim();
-  }
-  if (!company || is_likely_results_count_or_noise(company)) {
-    company = $item
-      .find(
-        '.artdeco-entity-lockup__subtitle, [data-testid="company-name"], .job-card-container__primary-description',
-      )
-      .first()
-      .text()
-      .trim();
-  }
-  if (is_likely_results_count_or_noise(company)) company = '';
-
-  var location = '';
-  var posted = '';
-
-  if (!company || !location) {
-    var paras = [];
-    $item.find('p').each(function () {
-      var t = $(this).text().replace(/\s+/g, ' ').trim();
-      if (
-        !t ||
-        t === title ||
-        is_likely_results_count_or_noise(t) ||
-        /^posted\b/i.test(t) ||
-        /\beasy apply\b/i.test(t) ||
-        /\balumni\b/i.test(t) ||
-        /\bworks here\b/i.test(t) ||
-        /^\s*·\s*$/.test(t) ||
-        /days ago\s*$/i.test(t)
-      ) {
-        return;
-      }
-      if (paras.indexOf(t) === -1) paras.push(t);
-    });
-    if (!company && paras.length) company = paras[0];
-    if (!location && paras.length > 1) {
-      for (var pi = 1; pi < paras.length; pi++) {
-        var cand = paras[pi];
-        if (cand === company) continue;
-        if (/on-?site|remote|hybrid|,|\(/.test(cand) || cand.length < 80) {
-          location = cand;
-          break;
-        }
-      }
+  if ($newCompanyWrap.length) {
+    var cNew = $newCompanyWrap.children('p').first().text().replace(/\s+/g, ' ').trim();
+    if (cNew && !is_noise(cNew)) {
+      company = cNew;
     }
   }
+  // Legacy: div._8f149b47 > p (company name text)
+  if (!company || is_noise(company)) {
+    var $companyDiv = $item.find('div._8f149b47').first();
+    if ($companyDiv.length) {
+      company = $companyDiv.find('p').first().text().replace(/\s+/g, ' ').trim();
+    }
+  }
+  // Fallback: older LinkedIn class selectors
+  if (!company || is_noise(company)) {
+    company = $item.find('div.a390a9fc > p').filter(function () {
+      return !$(this).hasClass('a390a9fc');
+    }).first().text().trim();
+  }
+  if (!company || is_noise(company)) {
+    company = $item.find('._41247193, .artdeco-entity-lockup__subtitle, [data-testid="company-name"], .job-card-container__primary-description')
+      .first().text().trim();
+  }
+  if (is_noise(company)) company = '';
 
-  $item.find('.ad75f074').each(function () {
-    var text = $(this).text().trim();
-    if (text.toLowerCase().includes('posted') || text.toLowerCase().includes(' ago')) {
-      posted = text.replace(/.*\n/, '').trim();
-    } else if (text.length > 0 && !location) {
-      location = text;
+  // Location: paragraph with class _31a95749 (second info line after company)
+  var location = '';
+  $item.find('p').each(function () {
+    var $p = $(this);
+    if ($p.hasClass('_31a95749') || $p.is('._31a95749')) {
+      var t = $p.text().replace(/\s+/g, ' ').trim();
+      if (t && !is_noise(t) && t !== company) {
+        location = t;
+        return false;
+      }
     }
   });
+  // New feed: location often on <p._64713141> (company is div._64713141 > p without _64713141 on the p)
   if (!location) {
-    location = $item
-      .find(
-        '.job-card-container__metadata-item, [data-testid="job-card-location"], .job-card-list__metadata-item',
-      )
-      .first()
-      .text()
-      .trim();
-  }
-  if (!posted) {
-    $item.find('span._4c50b7df').each(function () {
-      var text = $(this).text().trim();
-      if (text.toLowerCase().includes('posted')) {
-        posted = text;
+    $item.find('p._64713141').each(function () {
+      var t = $(this).text().replace(/\s+/g, ' ').trim();
+      if (t && !is_noise(t) && t !== company && t !== title) {
+        location = t;
         return false;
       }
     });
   }
+  // Fallback: find a <p> that looks like a location (contains On-site/Remote/Hybrid or has a comma)
+  if (!location) {
+    $item.find('p').each(function () {
+      var t = $(this).text().replace(/\s+/g, ' ').trim();
+      if (!t || is_noise(t) || t === title || t === company) return;
+      if (/on-?site|remote|hybrid/i.test(t) || (/,/.test(t) && t.length < 80)) {
+        location = t;
+        return false;
+      }
+    });
+  }
+  if (!location) {
+    location = $item.find('.job-card-container__metadata-item, [data-testid="job-card-location"], .job-card-list__metadata-item')
+      .first().text().trim();
+  }
+
+  // Posted: use the screen-reader span (class _0c5520e7) which has the full "Posted on ..." text.
+  // It is inside a <span aria-hidden="true"> wrapper — but _0c5520e7 is the real text element for AT.
+  var posted = '';
+  $item.find('span._0c5520e7').each(function () {
+    var t = $(this).text().replace(/\s+/g, ' ').trim();
+    if (/^posted\b/i.test(t)) {
+      posted = t;
+      return false;
+    }
+  });
+  // Fallback: any span whose visible text starts with "posted"
   if (!posted) {
     $item.find('span').each(function () {
-      var text = $(this).text().replace(/\s+/g, ' ').trim();
-      if (/^posted\b/i.test(text)) {
-        posted = text;
+      var t = $(this).text().replace(/\s+/g, ' ').trim();
+      if (/^posted\b/i.test(t)) {
+        posted = t;
         return false;
       }
     });
@@ -926,35 +1086,18 @@ function scrape_all_jobs() {
     var company = fields.company;
     var location = fields.location;
     var posted = fields.posted;
-    let link = '';
+    var link = resolveJobLinkForJobCard($item, $btn);
+    var jobUrl = $btn.data('le-job-url') ? String($btn.data('le-job-url')) : '';
 
-    // Method 0: link captured at selection time (currentJobId from URL when user clicked the card)
-    var capturedLink = $btn.data('captured-link');
-    if (capturedLink) { link = capturedLink; }
-
-    // Method 1: anchor with currentJobId param inside the card
-    if (!link) {
-      $item.find('a[href*="currentJobId="]').each(function() {
-        const href = $(this).attr('href') || '';
-        const match = href.match(/currentJobId=(\d+)/);
-        if (match) { link = 'https://www.linkedin.com/jobs/view/' + match[1]; return false; }
+    if (title || company || location || link || jobUrl) {
+      jobs.push({
+        title: title || 'Job',
+        company: company || '',
+        location: location || '',
+        posted: posted || '',
+        link: link || '',
+        jobUrl: jobUrl,
       });
-    }
-    // Method 2: direct /jobs/view/ anchor
-    if (!link) {
-      const $a = $item.find('a[href*="/jobs/view/"]').first();
-      if ($a.length) { let href = $a.attr('href') || ''; if (href.startsWith('/')) href = 'https://www.linkedin.com' + href; link = href.split('?')[0]; }
-    }
-    // Method 3: data-job-id attribute
-    if (!link) {
-      const jobId = $item.attr('data-job-id') || $item.find('[data-job-id]').first().attr('data-job-id');
-      if (jobId) link = 'https://www.linkedin.com/jobs/view/' + jobId;
-    }
-    // NOTE: No page-URL fallback — that gives all cards the same link and triggers
-    // the unique-index deduplication on the server, causing only 1 row to be saved.
-
-    if (title || company || location || link) {
-      jobs.push({ title: title || 'Job', company: company || '', location: location || '', posted: posted || '', link: link || '' });
     }
   });
 
@@ -974,48 +1117,8 @@ function scrape_all_jobs() {
     var company = fields.company;
     var location = fields.location;
     var posted = fields.posted;
+    var link = resolveJobLinkForJobCard($item, null);
 
-    // Extract Job Link from the dismiss button's aria-label componentkey
-    // The componentkey on each card matches a URL param; extract the job ID
-    // from anchors inside the card that point to /jobs/view/ or /jobs/search-results/
-    let link = '';
-    
-    // Method 1: look for any anchor whose href contains currentJobId= with a numeric ID
-    $item.find('a[href*="currentJobId="]').each(function() {
-      const href = $(this).attr('href') || '';
-      const match = href.match(/currentJobId=(\d+)/);
-      if (match) {
-        link = 'https://www.linkedin.com/jobs/view/' + match[1];
-        return false;
-      }
-    });
-
-    // Method 2: direct /jobs/view/ link (detail panel or card)
-    if (!link) {
-      const $a = $item.find('a[href*="/jobs/view/"]').first();
-      if ($a.length) {
-        let href = $a.attr('href') || '';
-        if (href.startsWith('/')) href = 'https://www.linkedin.com' + href;
-        link = href.split('?')[0];
-      }
-    }
-
-    // Method 3: data-job-id or entity urn
-    if (!link) {
-      const jobId = $item.attr('data-job-id') || 
-                    $item.find('[data-job-id]').first().attr('data-job-id');
-      if (jobId) {
-        link = 'https://www.linkedin.com/jobs/view/' + jobId;
-      } else {
-        const urn = $item.find('[data-entity-urn]').first().attr('data-entity-urn');
-        if (urn && urn.includes('jobPost:')) {
-          link = 'https://www.linkedin.com/jobs/view/' + urn.split('jobPost:')[1];
-        }
-      }
-    }
-
-    // NOTE: No page-URL fallback here either — same deduplication problem.
-    
     // Include row if we can identify the job (link is enough when LI changes title/company classes).
     if (title || company || location || link) {
       jobs.push({
@@ -1024,6 +1127,7 @@ function scrape_all_jobs() {
         location: location || '',
         posted: posted || '',
         link: link || '',
+        jobUrl: '',
       });
     }
   });
@@ -2140,7 +2244,7 @@ function individual_finder_tick() {
 
     var max = get_connections_total_count_hint() || get_connection_rows(get_connections_list_root()).length || 0;
     var maxEl = document.getElementById('ext-range-max');
-    if (maxEl) maxEl.textContent = max ? ('max: ' + max) : 'max: —';
+    if (maxEl) maxEl.textContent = max ? ('max: ' + max) : 'max: -';
 
     var sIn = document.getElementById('ext-range-start');
     var eIn = document.getElementById('ext-range-end');

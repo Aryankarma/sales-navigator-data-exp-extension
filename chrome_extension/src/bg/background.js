@@ -691,12 +691,19 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
         return;
       }
 
-      const header = ['title', 'company', 'location', 'posted', 'link'];
-      const csvRows = [header.join(',')];
+      const cols = [
+        { key: 'title', header: 'title' },
+        { key: 'company', header: 'company' },
+        { key: 'location', header: 'location' },
+        { key: 'posted', header: 'posted' },
+        { key: 'link', header: 'link' },
+        { key: 'jobUrl', header: 'Job URL' },
+      ];
+      const csvRows = [cols.map((c) => c.header).join(',')];
 
       for (const j of all_jobs) {
-        const row = header.map((key) => {
-          const value = j[key] || '';
+        const row = cols.map((c) => {
+          const value = j[c.key] || '';
           return '"' + String(value).replace(/"/g, '""').replace(/\r?\n|\r/g, ' ') + '"';
         });
         csvRows.push(row.join(','));

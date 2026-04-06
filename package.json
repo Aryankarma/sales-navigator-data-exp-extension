@@ -1,0 +1,13 @@
+{
+  "name": "linkedin-lead-extractor-extension",
+  "private": true,
+  "description": "Dev scripts: CRX3 pack + sync update.xml for leadextractor-host",
+  "scripts": {
+    "sync:update-xml": "node scripts/sync-update-xml.js",
+    "pack:crx": "node scripts/pack-crx.cjs",
+    "release": "npm run pack:crx && npm run sync:update-xml"
+  },
+  "devDependencies": {
+    "crx3": "^2.0.0"
+  }
+}
