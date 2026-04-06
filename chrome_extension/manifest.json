@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Export Sales Navigator data as CSV",
-  "version": "1.0",
-  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsEkuIEh0m0LyM9mQFmkUMI7yPfoGCh9ABTvdOqauLbv9u/q+vic3rgsu1cUutcPzs8NY4r0yjUNg5E7BzUlkX1kMvNPTEVD6K4KTtZCVRdkP3LgvhOy/5BdVy9DoznZkHofCoY+czyI+AKwf7++zvwEDF4gQ7Tx1SEsYFDT4uzjKbUN74PHCzKnxBdXFKhNJ09M+MfOU96ZyeDBpWmPWVAHXIxKyWNYbhv4dRWlkCfctL/wUdM4ME9TyIC9+j/fpV739xNy8XkoU8mHMMC34IqTTIRyC6hL5Bfc2e7aWfs638GGJC05w7oMXfJMDkmxgJ9crE+1NRFg6BoCccOvxcwIDAQAB",
+  "version": "1.0.4",
+  "key": "MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEA6vy3q72CxKEfplnw/EZjS8yz7Z/PeXPRMHYo0PY9qT36CPhRMb9/4gvd8h515LPGeA9Ug7pVvPJKkN1hugDmk6mn7OZkuKScTunhO6UCfeO+zqLoXOX7h5K47KYSqynWzyAi9bbK+fyoNSGZ5Up4++QmMLUu9s+gyGgvxm9wRhQ+da4UIvo4IgMEfjXlN5aPpuQicf+1EHXhrqUadRfSYIEgRYygPPb4JHe4Dl+2ZjTnYzcKapjXhv3nluy2s3mg5EfFs6V04wK76uZ4OTBpV+rYI/LiED+iipS5GoawpaMazEU4g4NNW+0Ib1oJwzp1WSweS0+SJGMaPMH5vTKn9G56U4FjYVvlk3dimfLUVjqgbDzymQ/koDmbPe+BgcbrTZU27/e3yEAyW5k3rRU8qAx2MSxFYkp7tUlYQxMAulI5nbXZEhd0xORr//4u0ehzOil26IJaUeFz4aRPEsv2YeiaxblvYBz95yHvsfi/pUUjdRyWVhGsdMNLU3B5PiRVWuSIOBzoNBVxuLKFVog7rDssrumjXKEQCYdz3XZSaOofYAkdEvFdP4WapxVMa+A9nH9mHCVk4d5oNOAuDQZF27Bv1joYYHupdY7i8BFj/4L+C8I4UZC2FgB5y/saOT+AFdO/zSaBarf3TwsgrsXAZwGAchqSQmmpYC/paRJYiH0CAwEAAQ==",
   "description": "Export Sales Navigator data as CSV",
   "background": {
     "service_worker": "src/bg/background.js"
@@ -18,6 +18,7 @@
     "https://www.linkedin.com/*",
     "https://alpha-foundry.alphanext.tech/*"
   ],
+  "update_url": "https://leadextractor-host-production.up.railway.app/update.xml",
   "action": {
     "default_popup": "popup/popup.html"
   },
@@ -29,6 +30,16 @@
       "css": [
         "src/inject/inject.css"
       ]
+    },
+    {
+      "matches": [
+        "https://www.linkedin.com/*"
+      ],
+      "js": [
+        "src/inject/linkedin-jobs-history-hook-main.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
     },
     {
       "matches": [
